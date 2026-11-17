@@ -1,0 +1,720 @@
+SCHULEFLOW UGANDA
+Product Requirements & System Features Specification
+Product: SchuleFlow – Examination, Marks Management and Student Report Generation System
+Target Market: Private secondary schools in Uganda
+Product Version: MVP – Version 1.0
+
+1. PROJECT OVERVIEW
+1.1 What we want to build
+SchuleFlow is a web-based examination, marks management and student report-generation system designed primarily for secondary schools in Uganda.
+The purpose is to simplify the process of collecting examination marks, calculating student performance, identifying errors, analyzing academic results and generating student report cards.
+The system should reduce teachers' administrative workload, minimize errors during examination processing and help Directors of Studies (DOS) and school administrators make better academic decisions.
+1.2 The problem we want to solve
+Many schools still depend on paper-based marksheets, Excel spreadsheets and manual calculations to process examination results.
+This creates several challenges:
+Teachers spend too much time transferring marks.
+Excel formulas can break or produce incorrect calculations.
+Student marks can be entered against the wrong names.
+Missing marks are sometimes discovered late.
+Directors of Studies spend considerable time compiling results.
+Report cards take too long to prepare.
+Parents sometimes wait too long to receive student reports.
+SchuleFlow should address these problems without forcing schools to abandon their existing examination processes.
+1.3 Our main product promise
+Enter marks once. Verify automatically. Generate accurate reports quickly.
+The system should allow schools to continue setting, printing, administering and marking examinations as they currently do, while SchuleFlow handles the administrative work of processing results.
+
+2. TARGET USERS AND SYSTEM ROLES
+The system should support different users with different access permissions.
+A. School Administrator
+Responsible for managing the school's general information and system configuration.
+Can:
+Register and manage students.
+Register classes and streams.
+Register subjects.
+Register teachers.
+Assign teachers to subjects and classes.
+Create examination periods.
+Manage user accounts.
+Configure grading systems and report templates.
+View school-wide academic performance.
+B. Director of Studies (DOS)
+Responsible for supervising examination processing and approving results.
+Can:
+View marks submitted by teachers.
+Monitor marks submission progress.
+Identify missing marks.
+Review suspicious or incorrect entries.
+Return marksheets to teachers for correction.
+Approve examination results.
+Generate class and school performance reports.
+Compare subject and class performance.
+C. Teacher
+Responsible for entering and submitting student marks.
+Can:
+View assigned classes and subjects.
+View student lists.
+Enter marks.
+Upload existing Excel marksheets.
+Review entered marks.
+Identify missing marks.
+Submit marks to the DOS.
+Correct marksheets returned for revision.
+View submission status.
+D. Headteacher
+Responsible for overall academic supervision.
+Can:
+View approved examination results.
+View school performance summaries.
+Compare class performance.
+View subject performance.
+Approve or authorize final report publication.
+Access academic reports.
+E. Parent/Guardian (Future Feature)
+Can:
+Access their child's approved reports.
+View academic progress.
+Download report cards.
+Receive school notifications.
+Parent access should be optional and introduced in a later version.
+
+3. MAIN SYSTEM FEATURES
+MODULE 1: USER AUTHENTICATION AND ACCESS CONTROL
+The system should have a secure login page.
+Features:
+User registration by authorized administrators.
+Login using username/email and password.
+Password reset.
+Role-based access control.
+Different dashboards for different users.
+Secure logout.
+User account activation and deactivation.
+Login activity records.
+Each user should only access information and actions relevant to their role.
+MODULE 2: SCHOOL SETUP AND CONFIGURATION
+Allow each school to configure its own academic environment.
+Features:
+School name and logo.
+School address and contact details.
+Academic year configuration.
+Term configuration.
+Class and stream creation.
+Subject registration.
+Teacher registration.
+Teacher-subject assignments.
+Class-teacher assignments.
+Examination configuration.
+Assessment structure configuration.
+Grading system configuration.
+Report card template configuration.
+The system should support multiple schools, with each school's information completely separated from other schools.
+MODULE 3: STUDENT MANAGEMENT
+Allow administrators to register and manage student information.
+Student information should include:
+Student full name.
+Admission number.
+Gender.
+Date of birth (optional).
+Class.
+Stream.
+Academic year.
+Parent/guardian contact information (optional).
+Features:
+Register individual students.
+Import students from Excel.
+Edit student information.
+Search students by name or admission number.
+Transfer students between classes.
+Promote students to the next class.
+Mark students as inactive or transferred.
+View individual student academic history.
+Important: Admission number should be the primary student identifier to prevent confusion between students with similar names.
+MODULE 4: CLASS AND SUBJECT MANAGEMENT
+Features:
+Create classes such as S1, S2, S3, S4, S5 and S6.
+Create streams such as East, West and North.
+Assign subjects to classes.
+Assign teachers to subjects.
+Assign teachers to specific classes.
+Manage subject combinations where applicable.
+View students enrolled in each class.
+Support different subject offerings across classes.
+MODULE 5: EXAMINATION MANAGEMENT
+This module manages the examination cycle.
+Features:
+Create examination periods.
+Set examination names, such as Beginning of Term, Midterm and End of Term.
+Assign examinations to academic terms.
+Select participating classes.
+Select subjects.
+Set assessment components and maximum marks.
+Set examination deadlines.
+Monitor examination processing progress.
+Lock examination entry after the submission deadline where authorized.
+The system should support different examination structures rather than assuming every school uses the same assessment arrangement.
+MODULE 6: MARKS ENTRY AND MANAGEMENT
+This is one of the most important modules.
+The system should provide a simple spreadsheet-like interface for teachers.
+The teacher should be able to:
+Log in.
+Select a class.
+Select a subject.
+Select an examination.
+View the class student list.
+Enter marks against each student.
+Save marks.
+Review the marksheet.
+Submit the marksheet to the DOS.
+The marksheet should display:
+Student admission number.
+Student name.
+Assessment components.
+Marks obtained.
+Maximum marks.
+Calculated total.
+Submission status.
+Additional features:
+Automatic saving or draft saving.
+Bulk marks entry.
+Edit marks before approval.
+Import marks from Excel.
+Export marksheets to Excel.
+Search and filter students.
+Highlight missing marks.
+Prevent duplicate entries.
+Validate marks against maximum allowed scores.
+Maintain a history of changes.
+The marks entry page should be easy to use, even for teachers who are not highly experienced with computers.
+MODULE 7: EXCEL MARKSHEET IMPORT AND EXPORT
+This is a key feature because we do not want to force schools to abandon their existing Excel workflow.
+Features:
+Upload existing Excel marksheets.
+Support agreed Excel templates and common column arrangements.
+Identify student admission numbers.
+Match students to existing school records.
+Identify unmatched students.
+Identify duplicate student records.
+Validate marks against maximum scores.
+Detect blank or missing marks.
+Display imported information for review.
+Allow corrections before saving.
+Export marksheets back to Excel.
+The system should provide a clear import preview before any uploaded marks are permanently saved.
+Where the system cannot confidently match a student, it should flag the record for manual confirmation instead of guessing.
+MODULE 8: CBC ASSESSMENT AND AUTOMATIC CALCULATIONS
+This is an important area of specialization for SchuleFlow.
+The calculation engine should support the assessment structure used by the school.
+For the initial configuration, support:
+Formative assessment / Activities of Integration (Classwork): out of 3.
+Summative assessment (Examination): out of 100.
+Classwork contribution: 20%.
+Examination contribution: 80%.
+Example:
+Classwork = 2.5/3
+Examination = 75/100
+Final score:
+(2.5 ÷ 3 × 20) + (75 ÷ 100 × 80) = 76.67%
+Features:
+Automatic weighted calculations.
+Configurable assessment components.
+Configurable assessment weights.
+Configurable maximum marks.
+Configurable rounding rules.
+Automatic grade assignment.
+Configurable grading scales.
+Support for multiple assessment components.
+Recalculation whenever marks are corrected.
+Validation that assessment weights add up correctly.
+The system must not hardcode one grading or assessment structure for every school.
+The calculation rules should be configurable and aligned with the applicable curriculum and school requirements.
+MODULE 9: AUTOMATIC ERROR DETECTION AND VALIDATION
+SchuleFlow should prevent errors before reports are generated.
+The system should detect:
+Marks exceeding maximum scores.
+Negative marks.
+Missing marks.
+Duplicate entries.
+Students assigned to incorrect classes.
+Marks entered under the wrong subject.
+Unmatched student admission numbers.
+Incomplete marksheets.
+Unusual changes to previously submitted marks.
+The system should highlight errors and explain what needs to be corrected.
+It should distinguish between genuinely missing marks, authorized exemptions and students who did not sit an examination.
+The system should never silently replace or invent missing marks.
+MODULE 10: RESULTS REVIEW AND APPROVAL
+Introduce a structured approval workflow.
+Proposed process:
+Teacher enters marks.
+Teacher saves and submits marks.
+DOS receives submitted marksheets.
+DOS reviews the results.
+DOS approves or returns the marksheet for correction.
+Teacher makes corrections where necessary.
+DOS approves the final marks.
+Authorized school leadership publishes the results.
+Features:
+Submission tracking.
+Pending approval dashboard.
+Approve and reject actions.
+Comments when returning marksheets.
+Resubmission after correction.
+Approval timestamps.
+User activity history.
+Lock approved marksheets against unauthorized changes.
+Any change after approval must require authorization and be recorded in an audit trail.
+MODULE 11: AUTOMATIC REPORT CARD GENERATION
+This is the main output of the system.
+SchuleFlow should generate individual student report cards automatically from approved examination results.
+The report card should include:
+School information
+School name.
+School logo.
+School address.
+Contact information.
+Student information
+Student name.
+Admission number.
+Class.
+Stream.
+Academic year.
+Term.
+Examination name.
+Academic performance
+Subject names.
+Assessment marks.
+Final subject scores.
+Grades.
+Relevant competency information.
+Learning outcomes.
+Teacher comments.
+General performance
+Total marks or applicable performance summary.
+Overall average where appropriate.
+Class position/ranking if enabled by the school.
+Attendance information.
+General teacher comments.
+Class teacher comments.
+Director of Studies comments.
+Headteacher comments.
+Other information
+Next term opening date.
+Closing date.
+School fees information if the school chooses to include it.
+Signature spaces.
+Official school stamp area.
+Features:
+Generate one student's report.
+Generate reports for an entire class.
+Generate reports for the entire school.
+Download reports as PDF.
+Print reports.
+Configure report card templates.
+Generate reports in bulk.
+Reprint previously generated reports.
+Control report publication.
+The report card design should be professional, clean, attractive and easy for parents to understand.
+The system should support the competency-based reporting structure rather than only producing traditional marks and grades.
+MODULE 12: CBC COMPETENCIES AND LEARNING OUTCOMES
+Provide a structured way to capture and display competency-related information.
+Features:
+Configure competencies.
+Configure learning outcomes.
+Associate competencies with subjects.
+Allow teachers to record relevant assessment observations.
+Capture teacher comments.
+Display competencies and learning outcomes on reports.
+Track learner progress over different terms.
+The competency framework should be configurable and should not force teachers to enter information that is not required by their school's reporting format.
+MODULE 13: A-LEVEL ASSESSMENT AND AUTOMATIC CALCULATIONS (S5 AND S6)
+SchuleFlow must support Advanced Level examination processing for Senior Five (S5) and Senior Six (S6).
+Unlike O-Level, A-Level assessment involves principal subjects, subsidiary subjects, subject combinations, grades and points. The system should therefore have a separate A-Level calculation engine.
+A. A-Level Subject Configuration
+The system should allow administrators to:
+Register A-Level subjects.
+Identify principal subjects.
+Identify subsidiary subjects.
+Assign subjects to students.
+Configure subject combinations.
+Assign teachers to subjects.
+Configure assessment components.
+Configure grading scales.
+Configure grade-to-point conversions.
+Configure aggregation rules.
+Each student should have an individual subject combination based on the subjects they are registered to study.
+The system should accommodate different combinations offered by different schools.
+B. A-Level Marks Entry
+Teachers should be able to enter marks for S5 and S6 students using the same convenient spreadsheet-style interface used for O-Level.
+Features:
+Select S5 or S6.
+Select subject and examination.
+View registered students.
+Enter individual student marks.
+Import marks from Excel.
+Export marksheets.
+Automatically calculate totals and averages where applicable.
+Identify missing marks.
+Detect invalid entries.
+Submit results for DOS approval.
+C. A-Level Examination Calculations
+The system should support:
+Automatic calculation of examination totals.
+Automatic conversion of marks into grades.
+Automatic conversion of grades into points.
+Calculation of principal subject points.
+Calculation of subsidiary subject grades and points where applicable.
+Calculation of student aggregates.
+Comparison of student performance across subjects.
+Calculation of class and subject performance summaries.
+The grading scales, point conversions and aggregation rules must be configurable and based on the applicable UNEB requirements or the school's approved internal assessment policy.
+D. Principal and Subsidiary Subject Management
+The system must distinguish between principal and subsidiary subjects.
+Features:
+Identify each student's principal subjects.
+Identify subsidiary subjects.
+Configure the number of principal subjects used in aggregation.
+Apply the correct point conversion to each subject category.
+Prevent subsidiary subjects from being treated as principal subjects.
+Display principal and subsidiary results separately.
+The system should support different A-Level combinations without assuming that all students study the same subjects.
+E. A-Level Aggregation and Performance Analysis
+Provide automatic calculation of student aggregates using the school's selected and approved aggregation rules.
+Features:
+Calculate principal subject points.
+Calculate applicable subsidiary points.
+Generate the student's aggregate.
+Display individual subject grades.
+Display individual subject points.
+Compare performance across combinations.
+Generate class performance summaries.
+Identify students with improving or declining performance.
+The aggregation engine should be configurable to accommodate applicable UNEB examination rules and school-based examination reporting.
+Do not hardcode one aggregation formula for every examination type.
+F. A-Level Report Card Generation
+A-Level student reports should be different from O-Level reports.
+The report card should display:
+Student name.
+Admission number.
+Class (S5 or S6).
+Academic year and term.
+Subject combination.
+Principal subjects.
+Subsidiary subjects.
+Marks obtained per subject.
+Grades per subject.
+Points per subject where applicable.
+Overall aggregate where applicable.
+Teacher comments.
+Class teacher comments.
+Director of Studies comments.
+Headteacher comments.
+General academic performance remarks.
+The system should generate individual and class-wide A-Level reports in PDF format.
+G. A-Level Academic Progress Tracking
+Allow schools to monitor student performance from S5 through S6.
+Features:
+Compare S5 and S6 performance.
+Track performance in individual subjects.
+Monitor changes in grades and points.
+View previous examination results.
+Identify students requiring academic support.
+Maintain a continuous A-Level academic record.
+H. A-Level Results and Analytics Dashboard
+The DOS and school administrators should be able to:
+View performance by subject.
+Compare different subject combinations.
+Identify the best-performing students.
+Identify subjects with declining performance.
+View class averages.
+Monitor marks submission.
+Generate A-Level examination performance summaries.
+I. Important A-Level System Requirements
+The developer must ensure that:
+A-Level and O-Level calculations are handled separately.
+Principal and subsidiary subjects are clearly distinguished.
+Subject combinations can be configured.
+Grading and points systems are configurable.
+Different internal examination formats can be supported.
+School-based examination aggregates are distinguishable from official UACE results and aggregates.
+Calculation rules can be updated without rebuilding the entire system.
+The system must be tested against independently verified A-Level calculation examples before deployment.
+
+MODULE 14: ACADEMIC PERFORMANCE ANALYTICS
+Provide a dashboard that helps school leaders understand academic performance.
+Features:
+Class performance summaries.
+Subject performance summaries.
+Overall examination performance.
+Highest and lowest scores.
+Average performance by subject.
+Comparison between classes.
+Comparison between examination periods.
+Students requiring academic support.
+Subjects with declining performance.
+Teacher marks submission progress.
+Missing results dashboard.
+Visualize information using charts, graphs and simple tables.
+The dashboard should help the DOS answer questions such as:
+Which class performed best?
+Which subjects have the lowest performance?
+Which students need additional academic support?
+Which teachers have not submitted marks?
+How has performance changed compared with the previous term?
+MODULE 15: STUDENT ACADEMIC HISTORY
+Allow the school to access a student's academic performance across different terms and academic years.
+Features:
+View previous examination results.
+Compare performance between terms.
+View subject-by-subject progress.
+Track improvement and decline.
+Access previously generated report cards.
+Maintain a continuous academic record.
+MODULE 16: NOTIFICATIONS AND REMINDERS
+Features:
+Notify teachers about marks submission deadlines.
+Notify DOS when marksheets are submitted.
+Notify teachers when marksheets are returned for correction.
+Notify administrators about incomplete results.
+Notify authorized users when reports are ready.
+Email, SMS and WhatsApp integration can be considered in later releases.
+
+4. SCHULEFLOW SMART MARKSHEET SCANNING (FUTURE COMPETITIVE FEATURE)
+We want to eventually introduce a feature that allows teachers to photograph or scan their existing printed marksheets.
+The purpose is to reduce manual data entry without changing how examinations are printed or administered.
+Proposed workflow:
+Teacher photographs or uploads a marksheet.
+SchuleFlow detects the table structure.
+OCR extracts student names, admission numbers and marks.
+The system matches students against registered student records.
+The system identifies uncertain or unreadable entries.
+The teacher reviews extracted information.
+Teacher confirms the information.
+Marks are transferred into the appropriate examination records.
+Important requirements:
+Do not require special examination paper printing.
+Do not require special barcodes on every examination paper.
+Support ordinary printed marksheets where technically feasible.
+Use admission numbers for reliable student matching.
+Provide manual correction for poor-quality scans.
+Never automatically approve uncertain extracted marks.
+Keep scanning optional.
+This feature should be developed after the core marks management and report generation modules are working reliably.
+
+5. HOW THE SYSTEM SHOULD LOOK
+We want a modern, professional, clean and simple web application.
+It should be responsive and work on:
+Desktop computers.
+Laptops.
+Tablets.
+Smartphones.
+Main navigation menu
+The sidebar should contain:
+Dashboard
+Students
+Classes & Streams
+Subjects
+Teachers
+Examinations
+Marks Entry
+Marksheets
+Results & Analysis
+Report Cards
+Academic History
+Settings
+User Management
+The menu should change according to the user's role.
+Dashboard design
+The dashboard should display useful summary cards, for example:
+Total students.
+Total classes.
+Total subjects.
+Active examination.
+Marksheets submitted.
+Pending approvals.
+Incomplete results.
+Reports generated.
+Include charts showing academic performance and marks submission progress.
+Marks entry page design
+This page should look similar to a spreadsheet.
+Columns:
+Admission No.
+Student Name
+Classwork /3
+Exam /100
+Final Score
+SF001
+Student A
+2.5
+75
+76.67
+SF002
+Student B
+3.0
+80
+84.00
+
+The figures above are illustrative.
+The final score should calculate automatically after marks are entered.
+Report card design
+The report should be professional and printable on A4 paper.
+It should have a clear school identity, student details, subject performance, CBC-related information, teacher comments and authorized signatures.
+The report should be readable in both printed and digital formats.
+
+6. IMPORTANT SYSTEM REQUIREMENTS
+A. Multi-school support
+SchuleFlow should eventually operate as a multi-tenant platform.
+Each school should have:
+Its own account.
+Its own users.
+Its own students.
+Its own examination records.
+Its own report templates.
+Its own configurations.
+One school must never access another school's private information.
+B. Security
+Secure password storage.
+Role-based permissions.
+Secure sessions.
+HTTPS.
+Database backups.
+Audit logs.
+Protection against unauthorized access.
+Validation of uploaded files.
+Secure school data separation.
+C. Reliability
+Prevent accidental deletion of approved results.
+Save marks safely.
+Maintain transaction integrity.
+Provide clear error messages.
+Maintain a history of important changes.
+Allow database backup and restoration.
+D. Performance
+Handle hundreds or thousands of students per school.
+Support multiple teachers working simultaneously.
+Allow bulk marks entry.
+Generate reports efficiently.
+Avoid unnecessary page loading.
+E. Usability
+Simple navigation.
+Minimal training requirements.
+Clear instructions.
+Easy-to-read tables.
+Responsive design.
+Efficient data entry.
+Minimize the number of clicks required for common tasks.
+F. Internet connectivity
+The first release should be designed for online use but should handle intermittent connectivity gracefully.
+Important:
+Preserve unsaved marks where possible.
+Provide clear connection status.
+Prevent duplicate submissions when reconnecting.
+Do not silently lose entered information.
+Full offline functionality can be considered in a later release.
+
+7. PROPOSED MVP DEVELOPMENT PRIORITIES
+We should not attempt to develop everything at once.
+The following is the recommended implementation sequence.
+PHASE 1: CORE FOUNDATION
+Login and authentication.
+Role-based access.
+School configuration.
+Student management.
+Class and stream management.
+Subject management.
+Teacher management.
+PHASE 2: EXAMINATION AND MARKS PROCESSING
+Examination creation.
+Teacher assignments.
+Marks entry.
+Excel import and export.
+Automatic calculations.
+Error detection.
+Missing marks identification.
+Marks submission and approval.
+PHASE 3: REPORT GENERATION
+Report card templates.
+CBC assessment information.
+Teacher comments.
+Automatic report generation.
+PDF downloads.
+Bulk printing.
+PHASE 4: ACADEMIC INTELLIGENCE
+DOS dashboard.
+Class performance analysis.
+Subject performance analysis.
+Student academic history.
+Academic progress comparisons.
+PHASE 5: ADVANCED FEATURES
+Smart marksheet scanning.
+OCR and student matching.
+Parent portal.
+Notifications.
+Attendance integration.
+Advanced analytics.
+
+8. ACCEPTANCE CRITERIA: HOW WE WILL KNOW THE MVP WORKS
+Before launching, the system must successfully demonstrate the following:
+An administrator can register a school and configure its classes, subjects and teachers.
+An administrator can register students individually and import them from Excel.
+A teacher can access only their assigned classes and subjects.
+A teacher can enter and save marks.
+A teacher can import an existing Excel marksheet.
+The system can identify invalid and missing marks.
+The calculation engine produces correct results against independently verified test cases.
+The DOS can review, approve or return submitted marksheets.
+Approved marks cannot be changed without authorization.
+The system can generate an individual student report card.
+The system can generate reports for an entire class.
+Reports can be downloaded and printed.
+School leaders can view academic performance summaries.
+Different schools' information remains completely separated.
+The application works on computers, tablets and smartphones.
+We should test with sample data first and then conduct a supervised pilot in a real school.
+
+9. PROPOSED TECHNOLOGY STACK
+The developer can recommend alternatives, but our preferred starting stack is:
+Component
+Preferred technology
+Backend
+Python + Flask
+Frontend
+HTML, CSS, Bootstrap, JavaScript
+Database (development)
+SQLite
+Database (production)
+PostgreSQL
+Database integration
+SQLAlchemy
+Authentication
+Flask-Login
+Report generation
+PDF generation library
+Excel processing
+Pandas / OpenPyXL
+Scanning (future)
+OCR / document recognition
+Version control
+Git + GitHub
+Hosting
+Suitable cloud hosting provider
+
+The application should be modular so that additional features can be introduced without rebuilding the entire system.
+
+10. FINAL PRODUCT DIRECTION
+Our goal is not simply to create another school management system.
+We want to build a solution that specializes in examination processing and student report generation for Ugandan secondary schools.
+Our competitive advantage should come from:
+Working with schools' existing examination workflows.
+Making marks entry easier.
+Supporting existing Excel marksheets.
+Preventing examination processing errors.
+Supporting configurable CBC assessment and reporting.
+Reducing the workload of teachers and Directors of Studies.
+Generating professional student reports quickly.
+Making academic performance information easier to understand.
+The guiding product principle:
+SchuleFlow should make examination processing so simple that teachers spend less time handling marks and more time concentrating on teaching.
+Our first development milestone: Deliver a working MVP that allows one school to register students, enter or import marks, automatically calculate results, review and approve marks, and generate professional student report cards.
+All additional features should build around this foundation.
+Show less
+

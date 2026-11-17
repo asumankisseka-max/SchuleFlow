@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+:root {
+  --school-primary: #1e3a8a;
+  --school-primary-hover: #172554;
+  --school-primary-contrast: #ffffff;
+  --school-primary-ink: #1e3a8a;
+  --school-primary-soft: rgba(30, 58, 138, 0.08);
+  --school-primary-border: rgba(30, 58, 138, 0.3);
+  --school-secondary: #b45309;
+  --school-secondary-contrast: #ffffff;
+  --school-secondary-soft: rgba(180, 83, 9, 0.12);
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    color: #0f172a;
+    background-color: #f8fafc;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+}
+
+/* Per-school uniform color theming scoped strictly inside .school-themed containers */
+.school-themed .bg-blue-900 {
+  background-color: var(--school-primary) !important;
+  color: var(--school-primary-contrast) !important;
+}
+
+.school-themed .hover\:bg-blue-950:hover,
+.school-themed .bg-blue-900:hover {
+  background-color: var(--school-primary-hover) !important;
+}
+
+.school-themed .text-blue-900,
+.school-themed .text-blue-800 {
+  color: var(--school-primary-ink) !important;
+}
+
+.school-themed .border-blue-800,
+.school-themed .border-blue-700,
+.school-themed .focus\:border-blue-800:focus {
+  border-color: var(--school-primary) !important;
+}
+
+.school-themed .bg-blue-50\/60,
+.school-themed .bg-blue-50\/40,
+.school-themed .bg-blue-50 {
+  background-color: var(--school-primary-soft) !important;
+}
+
+.school-themed .border-blue-200 {
+  border-color: var(--school-primary-border) !important;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-page-break {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .print-avoid-break {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}

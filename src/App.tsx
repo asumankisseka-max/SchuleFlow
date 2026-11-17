@@ -1,0 +1,1212 @@
+import { useEffect, useMemo, useState } from 'react';
+import { AlertCircle, BookOpenCheck, Loader2, Menu } from 'lucide-react';
+import { AcademicHistoryView } from './components/AcademicHistoryView';
+import { BillingView } from './components/BillingView';
+import { ClassesView } from './components/ClassesView';
+import { DashboardView } from './components/DashboardView';
+import { ExaminationsView } from './components/ExaminationsView';
+import { LoginView } from './components/LoginView';
+import { MarksEntryView } from './components/MarksEntryView';
+import { MarksheetsApprovalView } from './components/MarksheetsApprovalView';
+import { PlatformAdminView } from './components/PlatformAdminView';
+import { ReportCardsView } from './components/ReportCardsView';
+import { ResultsAnalysisView } from './components/ResultsAnalysisView';
+import { SettingsView } from './components/SettingsView';
+import { Sidebar } from './components/Sidebar';
+import { StudentsView } from './components/StudentsView';
+import { SubjectsView } from './components/SubjectsView';
+import { TeachersView } from './components/TeachersView';
+import { UserManagementView } from './components/UserManagementView';
+import { useSchoolContext } from './context/SchoolContext';
+import type {
+  CurriculumScope,
+  ExaminationPeriod,
+  MarkEntryItem,
+  MarksheetAuditEntry,
+  MarksheetRecord,
+  SchoolSettings,
+  StreamClass,
+  StudentProfile,
+  SubjectCombination,
+  SubjectDefinition,
+  UserAccount,
+  WorkspaceTab,
+} from './types';
+import {
+  buildSchoolThemeVars,
+  DEFAULT_UNIFORM_PRIMARY,
+  DEFAULT_UNIFORM_SECONDARY,
+  normalizeHexColor,
+} from './utils/schoolTheme';
+import {
+  canAccessTab,
+  getDashboardPathForRole,
+  getDefaultTabForRole,
+  isTeachingRole,
+  normalizeUserRole,
+  ROLE_DISPLAY_NAMES,
+} from './utils/rbac';
+
+const TAB_TITLES: Record<WorkspaceTab, string> = {
+  dashboard: 'Overview',
+  students: 'Students',
+  classes: 'Classes',
+  subjects: 'Subjects',
+  teachers: 'Teachers',
+  examinations: 'Exams',
+  'marks-entry': 'Enter Marks',
+  marksheets: 'Review Marks',
+  'results-analysis': 'Results',
+  reports: 'Report Cards',
+  'academic-history': 'Student History',
+  settings: 'School Settings',
+  users: 'Staff Accounts',
+  billing: 'School Billing',
+  'platform-admin': 'Platform Administration',
+};
+
+const EXAM_CONTEXT_TABS = new Set<WorkspaceTab>([
+  'dashboard',
+  'examinations',
+  'marks-entry',
+  'marksheets',
+  'results-analysis',
+  'reports',
+]);
+
+const CLASS_CONTEXT_TABS = new Set<WorkspaceTab>([
+  'marks-entry',
+  'results-analysis',
+  'reports',
+]);
+
+export default function App() {
+  const {
+    authProfile,
+    authLoading,
+    authError,
+    schools,
+    auditLogs,
+    activeSchoolId,
+    activeSchool,
+    db,
+    subscriptionLocked,
+    subscriptionPortalData,
+    loadingWorkspace,
+    workspaceError,
+    recentAccounts,
+    removeRecentAccount,
+    signInWithCredentials,
+    signInWithGoogle,
+    signOutWorkspace,
+    refreshPlatformData,
+    refreshTenantWorkspace,
+    refreshSubscriptionPortal,
+    updateLocalTenantDb,
+    updateLocalActiveSchool,
+    tenantApi,
+  } = useSchoolContext();
+
+  const [activeExamId, setActiveExamId] = useState<string>('');
+  const [activeClassId, setActiveClassId] = useState<string>('');
+  const [activeTab, setActiveTab] = useState<WorkspaceTab>('dashboard');
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [errorBanner, setErrorBanner] = useState<string | null>(null);
+  const [initialBootDone, setInitialBootDone] = useState(false);
+
+  useEffect(() => {
+    if (!authLoading) {
+      setInitialBootDone(true);
+    }
+  }, [authLoading]);
+
+  const currentUser: UserAccount | null = useMemo(() => {
+    if (!authProfile) return null;
+    const normalizedRole = normalizeUserRole(authProfile.schoolRole);
+    const cleanEmail = authProfile.email.trim().toLowerCase();
+    const uid = authProfile.uid;
+    const matchedStaff = db?.users.find((u) => {
+      if (cleanEmail && u.email.trim().toLowerCase() === cleanEmail) {
+        return true;
+      }
+      const unprefixed = u.id.includes(':') ? u.id.split(':').slice(1).join(':') : u.id;
+      const prefixed = activeSchoolId ? `${activeSchoolId}:${unprefixed}` : u.id;
+      return (
+        u.id === uid ||
+        unprefixed === uid ||
+        prefixed === uid ||
+        `local:${u.id}` === uid ||
+        `local:${prefixed}` === uid ||
+        `local:${unprefixed}` === uid
+      );
+    });
+    if (matchedStaff && authProfile.globalRole !== 'super_admin') {
+      return {
+        ...matchedStaff,
+        role: normalizeUserRole(matchedStaff.role),
+      };
+    }
+    return {
+      id: matchedStaff?.id ?? authProfile.uid,
+      name: authProfile.name,
+      email: authProfile.email,
+      username: authProfile.username || authProfile.email.split('@')[0] || 'user',
+      password: '',
+      role: normalizedRole,
+      active: authProfile.active,
+      assignedClassIds: matchedStaff?.assignedClassIds ?? [],
+      assignedSubjectIds: matchedStaff?.assignedSubjectIds ?? [],
+    };
+  }, [authProfile, activeSchoolId, db?.users]);
+
+  // Smart Role-Based URL Routing & Route Guard
+  useEffect(() => {
+    if (authLoading) return;
+
+    if (!authProfile || !currentUser) {
+      if (window.location.pathname !== '/') {
+        window.history.replaceState({}, '', '/');
+      }
+      return;
+    }
+
+    const expectedPath = getDashboardPathForRole(authProfile.globalRole, currentUser.role);
+    if (window.location.pathname !== expectedPath) {
+      window.history.replaceState({}, '', expectedPath);
+    }
+
+    const defaultTab = getDefaultTabForRole(authProfile.globalRole, currentUser.role);
+    setActiveTab((prev) =>
+      canAccessTab(currentUser.role, prev, authProfile.globalRole) ? prev : defaultTab
+    );
+
+    const handlePopState = () => {
+      if (window.location.pathname !== expectedPath) {
+        window.history.replaceState({}, '', expectedPath);
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [authLoading, authProfile, currentUser]);
+
+  // Reset class/exam/student selection cleanly whenever switching school tenants
+  useEffect(() => {
+    setSelectedStudentId(null);
+    if (db) {
+      setActiveExamId(db.exams[db.exams.length - 1]?.id ?? '');
+      setActiveClassId(db.classes[0]?.id ?? '');
+    } else {
+      setActiveExamId('');
+      setActiveClassId('');
+    }
+  }, [activeSchoolId, db?.exams.length, db?.classes.length]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 4500);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!errorBanner) return;
+    const t = setTimeout(() => setErrorBanner(null), 6000);
+    return () => clearTimeout(t);
+  }, [errorBanner]);
+
+  const effectiveCurriculumScope: CurriculumScope =
+    db?.settings.curriculumScope ?? activeSchool?.curriculumScope ?? 'olevel_alevel';
+
+  const scopedClasses = useMemo(() => {
+    if (!db) return [];
+    const filtered = db.classes.filter((c) =>
+      effectiveCurriculumScope === 'olevel_only'
+        ? c.level === 'olevel'
+        : effectiveCurriculumScope === 'alevel_only'
+          ? c.level === 'alevel'
+          : true
+    );
+    return filtered.length > 0 ? filtered : db.classes;
+  }, [db, effectiveCurriculumScope]);
+
+  const activeExam = useMemo(() => {
+    if (!db || db.exams.length === 0) return null;
+    return db.exams.find((e) => e.id === activeExamId) ?? db.exams[db.exams.length - 1];
+  }, [db, activeExamId]);
+
+  const activeClass = useMemo(() => {
+    if (scopedClasses.length === 0) return null;
+    return scopedClasses.find((c) => c.id === activeClassId) ?? scopedClasses[0];
+  }, [scopedClasses, activeClassId]);
+
+  const pendingApprovalCount = useMemo(() => {
+    if (!db || !activeExam) return 0;
+    return db.marksheets.filter((m) => m.examId === activeExam.id && m.status === 'submitted').length;
+  }, [db, activeExam]);
+
+  const returnedForTeacherCount = useMemo(() => {
+    if (!db || !activeExam || !currentUser) return 0;
+    return db.marksheets.filter(
+      (m) =>
+        m.examId === activeExam.id &&
+        m.status === 'returned' &&
+        (!isTeachingRole(currentUser.role) || m.teacherId === currentUser.id)
+    ).length;
+  }, [db, activeExam, currentUser]);
+
+  if (!initialBootDone && authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3 text-slate-600">
+        <Loader2 className="h-7 w-7 animate-spin text-blue-900" />
+        <p className="text-xs font-medium">Verifying your institutional session...</p>
+      </div>
+    );
+  }
+
+  if (!authProfile || !currentUser) {
+    return (
+      <LoginView
+        loading={authLoading}
+        error={authError}
+        recentAccounts={recentAccounts}
+        onRemoveRecentAccount={removeRecentAccount}
+        onCredentialSignIn={signInWithCredentials}
+        onGoogleSignIn={signInWithGoogle}
+      />
+    );
+  }
+
+  // Strict Super Admin Isolation: /platform/dashboard only (no internal school marks or grading)
+  if (authProfile.globalRole === 'super_admin') {
+    return (
+      <PlatformAdminView
+        authProfile={authProfile}
+        schools={schools}
+        auditLogs={auditLogs}
+        onRefreshPlatform={refreshPlatformData}
+        onLogout={signOutWorkspace}
+      />
+    );
+  }
+
+  if (loadingWorkspace && !db && !subscriptionLocked) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-3 text-slate-600">
+        <Loader2 className="h-7 w-7 animate-spin text-blue-900" />
+        <p className="text-xs font-medium">
+          Loading isolated tenant workspace for {activeSchool?.name ?? 'your school'}...
+        </p>
+      </div>
+    );
+  }
+
+  // Strict Subscription Expiry Gate: school users can ONLY access the Subscription Portal
+  if (subscriptionLocked && activeSchool && tenantApi) {
+    if (!currentUser.active) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <div className="max-w-md w-full rounded-xl border border-red-200 bg-white p-6 space-y-4">
+            <div className="flex items-start gap-2.5 text-red-800">
+              <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+              <div>
+                <h2 className="font-display text-base font-bold">Workspace Access Restricted</h2>
+                <p className="text-xs text-slate-600 mt-1">
+                  Account deactivated. Please contact your School Administrator.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void signOutWorkspace()}
+              className="rounded-md border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    const portalThemeVars = buildSchoolThemeVars(
+      activeSchool.primaryColor,
+      activeSchool.secondaryColor
+    );
+
+    return (
+      <div
+        style={portalThemeVars}
+        className="min-h-screen bg-slate-50 text-slate-900 flex flex-col school-themed"
+      >
+        <header
+          className="h-16 bg-white border-b-2 border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4"
+          style={{ borderBottomColor: 'var(--school-secondary, #e2e8f0)' }}
+        >
+          <div className="flex items-center gap-2.5 min-w-0">
+            {activeSchool.logoUrl ? (
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 bg-white p-0.5 overflow-hidden">
+                <img
+                  src={activeSchool.logoUrl}
+                  alt={`${activeSchool.name} badge`}
+                  className="h-full w-full object-contain"
+                />
+              </div>
+            ) : (
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-blue-900 text-white">
+                <BookOpenCheck className="h-4 w-4" aria-hidden="true" />
+              </div>
+            )}
+            <div className="min-w-0">
+              <span className="font-display text-base font-bold tracking-tight text-slate-900 block leading-tight">
+                SchuleFlow Subscription Portal
+              </span>
+              <span className="text-[11px] text-slate-500 truncate block">
+                {activeSchool.name}
+              </span>
+            </div>
+          </div>
+          <div className="text-xs text-slate-600 hidden sm:flex items-center gap-2">
+            <span className="font-medium text-slate-900">{currentUser.name}</span>
+            <span aria-hidden="true" className="text-slate-300">
+              ·
+            </span>
+            <span>{ROLE_DISPLAY_NAMES[normalizeUserRole(currentUser.role)]}</span>
+          </div>
+        </header>
+
+        <main className="flex-1 p-4 sm:p-6 max-w-6xl w-full mx-auto">
+          <BillingView
+            school={activeSchool}
+            activeStudentsCount={subscriptionPortalData?.activeStudentsCount ?? 0}
+            invoices={subscriptionPortalData?.invoices ?? []}
+            expiredLocked={true}
+            onRefreshStatus={refreshSubscriptionPortal}
+            onLogout={() => void signOutWorkspace()}
+          />
+        </main>
+      </div>
+    );
+  }
+
+  if (workspaceError || !db || !tenantApi || !currentUser.active) {
+    const restrictedMessage = !currentUser.active
+      ? 'Account deactivated. Please contact your School Administrator.'
+      : workspaceError || 'Account not assigned to an active school workspace.';
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <div className="max-w-md w-full rounded-xl border border-red-200 bg-white p-6 space-y-4">
+          <div className="flex items-start gap-2.5 text-red-800">
+            <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+            <div>
+              <h2 className="font-display text-base font-bold">Workspace Access Restricted</h2>
+              <p className="text-xs text-slate-600 mt-1">{restrictedMessage}</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => refreshTenantWorkspace()}
+              className="rounded-md bg-blue-900 px-3.5 py-2 text-xs font-semibold text-white hover:bg-blue-950"
+            >
+              Retry
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOutWorkspace()}
+              className="rounded-md border border-slate-300 bg-white px-3.5 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Sign Out
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const defaultTab = getDefaultTabForRole(authProfile.globalRole, currentUser.role);
+
+  const safeNavigate = (tab: WorkspaceTab) => {
+    if (canAccessTab(currentUser.role, tab, authProfile.globalRole)) {
+      setActiveTab(tab);
+    } else {
+      setActiveTab(defaultTab);
+    }
+  };
+
+  const effectiveTab: WorkspaceTab = canAccessTab(
+    currentUser.role,
+    activeTab,
+    authProfile.globalRole
+  )
+    ? activeTab
+    : defaultTab;
+
+  const runPersist = async (fn: () => Promise<unknown>, fallbackErr: string) => {
+    setErrorBanner(null);
+    try {
+      await fn();
+    } catch (err: unknown) {
+      setErrorBanner(err instanceof Error ? err.message : fallbackErr);
+    }
+  };
+
+  // Marksheet Draft / Submit / Approval Workflow Handlers
+  const makeAudit = (action: string, details: string): MarksheetAuditEntry => ({
+    id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    actorId: currentUser.id,
+    actorName: currentUser.name,
+    actorRole: currentUser.role,
+    action,
+    details,
+  });
+
+  const buildUpdatedMarksheet = (
+    examId: string,
+    classId: string,
+    subjectId: string,
+    updater: (existing: MarksheetRecord) => MarksheetRecord
+  ): MarksheetRecord => {
+    const existing = db.marksheets.find(
+      (m) => m.examId === examId && m.classId === classId && m.subjectId === subjectId
+    );
+    const cls = db.classes.find((c) => c.id === classId);
+    const base: MarksheetRecord = existing ?? {
+      id: `ms-${examId}-${classId}-${subjectId}`,
+      examId,
+      classId,
+      subjectId,
+      teacherId: cls?.subjectTeacherMap[subjectId] ?? currentUser.id,
+      status: 'draft',
+      entries: {},
+      lastModified: new Date().toISOString(),
+      auditHistory: [],
+    };
+    return updater(base);
+  };
+
+  const applyMarksheetMutation = async (updated: MarksheetRecord, successMsg: string) => {
+    updateLocalTenantDb((prev) => {
+      const idx = prev.marksheets.findIndex(
+        (m) =>
+          m.examId === updated.examId &&
+          m.classId === updated.classId &&
+          m.subjectId === updated.subjectId
+      );
+      const nextSheets =
+        idx >= 0
+          ? prev.marksheets.map((m, i) => (i === idx ? updated : m))
+          : [...prev.marksheets, updated];
+      return { ...prev, marksheets: nextSheets };
+    });
+    setNotice(successMsg);
+    await runPersist(() => tenantApi.saveMarksheet(updated), 'Failed to persist marksheet.');
+  };
+
+  const handleSaveMarksheetEntries = (
+    examId: string,
+    classId: string,
+    subjectId: string,
+    entries: Record<string, MarkEntryItem>,
+    actionNote = 'Saved marksheet draft'
+  ) => {
+    const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
+      ...ms,
+      entries,
+      lastModified: new Date().toISOString(),
+      auditHistory: [...ms.auditHistory, makeAudit('Draft Saved', actionNote)],
+    }));
+    void applyMarksheetMutation(updated, 'Marksheet draft saved to school database.');
+  };
+
+  const handleSubmitMarksheet = (
+    examId: string,
+    classId: string,
+    subjectId: string,
+    entries: Record<string, MarkEntryItem>
+  ) => {
+    const now = new Date().toISOString();
+    const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
+      ...ms,
+      entries,
+      status: 'submitted',
+      submittedAt: now,
+      submittedBy: currentUser.id,
+      dosComment: undefined,
+      lastModified: now,
+      auditHistory: [
+        ...ms.auditHistory,
+        makeAudit('Submitted to DOS', 'All required student marks verified and submitted for DOS review.'),
+      ],
+    }));
+    void applyMarksheetMutation(updated, 'Marksheet submitted to Director of Studies for verification.');
+  };
+
+  const handleApproveMarksheet = (examId: string, classId: string, subjectId: string) => {
+    const now = new Date().toISOString();
+    const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
+      ...ms,
+      status: 'approved',
+      approvedAt: now,
+      approvedBy: currentUser.id,
+      lastModified: now,
+      auditHistory: [
+        ...ms.auditHistory,
+        makeAudit('Approved by DOS', 'Marksheet approved and locked for terminal report cards.'),
+      ],
+    }));
+    void applyMarksheetMutation(updated, 'Marksheet approved and locked.');
+  };
+
+  const handleReturnMarksheet = (
+    examId: string,
+    classId: string,
+    subjectId: string,
+    comment: string
+  ) => {
+    const now = new Date().toISOString();
+    const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
+      ...ms,
+      status: 'returned',
+      dosComment: comment,
+      lastModified: now,
+      auditHistory: [...ms.auditHistory, makeAudit('Returned for Revision', comment)],
+    }));
+    void applyMarksheetMutation(updated, 'Marksheet returned to teacher with DOS comment.');
+  };
+
+  const handleReopenMarksheet = (examId: string, classId: string, subjectId: string) => {
+    const now = new Date().toISOString();
+    const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
+      ...ms,
+      status: 'draft',
+      lastModified: now,
+      auditHistory: [
+        ...ms.auditHistory,
+        makeAudit('Reopened / Unlocked', 'Authorized unlock for score amendment.'),
+      ],
+    }));
+    void applyMarksheetMutation(updated, 'Marksheet unlocked for revision.');
+  };
+
+  const handlePublishAllApproved = (examId: string) => {
+    const now = new Date().toISOString();
+    updateLocalTenantDb((prev) => ({
+      ...prev,
+      marksheets: prev.marksheets.map((m) =>
+        m.examId === examId && m.status === 'approved'
+          ? {
+              ...m,
+              status: 'published',
+              lastModified: now,
+              auditHistory: [
+                ...m.auditHistory,
+                makeAudit('Published Results', 'Published officially by DOS/Headteacher.'),
+              ],
+            }
+          : m
+      ),
+      exams: prev.exams.map((ex) =>
+        ex.id === examId ? { ...ex, published: true, locked: true } : ex
+      ),
+    }));
+    setNotice('All approved marksheets published and examination locked.');
+    void runPersist(() => tenantApi.publishExam(examId), 'Failed to publish exam.');
+  };
+
+  const schoolThemeVars = buildSchoolThemeVars(
+    db.settings.uniformPrimaryColor ?? activeSchool?.primaryColor,
+    db.settings.uniformSecondaryColor ?? activeSchool?.secondaryColor
+  );
+
+  return (
+    <div
+      style={schoolThemeVars}
+      className="min-h-screen flex bg-slate-50 text-slate-900 school-themed"
+    >
+      <Sidebar
+        currentUser={currentUser}
+        globalRole={authProfile.globalRole}
+        activeTab={effectiveTab}
+        onSelectTab={safeNavigate}
+        settings={db.settings}
+        pendingApprovalCount={pendingApprovalCount}
+        returnedCount={returnedForTeacherCount}
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
+        onLogout={() => void signOutWorkspace()}
+      />
+
+      <div className="flex-1 flex flex-col min-w-0">
+        {/* Clean Single-Row Top Header */}
+        <header className="sticky top-0 z-30 h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-4 no-print">
+          <div className="flex items-center gap-3 min-w-0">
+            <button
+              type="button"
+              onClick={() => setMobileSidebarOpen(true)}
+              className="lg:hidden p-2 rounded-md text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+              aria-label="Open menu"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                <span className="truncate font-medium text-slate-600">{db.settings.schoolName}</span>
+                <span aria-hidden="true">/</span>
+                <span className="text-slate-900 font-medium whitespace-nowrap">
+                  {TAB_TITLES[effectiveTab]}
+                </span>
+              </div>
+              <h1 className="font-display text-base sm:text-lg font-bold text-slate-900 truncate">
+                {TAB_TITLES[effectiveTab]}
+              </h1>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 shrink-0">
+            {notice && (
+              <span className="hidden md:inline-block rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800">
+                {notice}
+              </span>
+            )}
+            <div className="hidden sm:flex items-center gap-2 text-xs text-slate-600 whitespace-nowrap">
+              <span className="font-medium text-slate-900">{currentUser.name}</span>
+              <span aria-hidden="true" className="text-slate-300">
+                ·
+              </span>
+              <span>{ROLE_DISPLAY_NAMES[normalizeUserRole(currentUser.role)]}</span>
+            </div>
+          </div>
+        </header>
+
+        {/* Contextual Exam & Class Switcher (Shown only on exam/marks/report pages) */}
+        {currentUser.role !== 'bursar' &&
+          EXAM_CONTEXT_TABS.has(effectiveTab) &&
+          db.exams.length > 0 && (
+            <div className="bg-white/90 border-b border-slate-200 px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 no-print">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <label
+                    htmlFor="workspace-exam"
+                    className="text-xs font-medium text-slate-500 whitespace-nowrap"
+                  >
+                    Exam Term
+                  </label>
+                  <select
+                    id="workspace-exam"
+                    value={activeExam?.id ?? ''}
+                    onChange={(e) => setActiveExamId(e.target.value)}
+                    className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-900 focus:border-blue-800 focus:outline-none"
+                  >
+                    {db.exams.map((ex) => (
+                      <option key={ex.id} value={ex.id}>
+                        {ex.name} · {ex.academicYear}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {CLASS_CONTEXT_TABS.has(effectiveTab) && scopedClasses.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <label
+                      htmlFor="workspace-class"
+                      className="text-xs font-medium text-slate-500 whitespace-nowrap"
+                    >
+                      Class
+                    </label>
+                    <select
+                      id="workspace-class"
+                      value={activeClass?.id ?? ''}
+                      onChange={(e) => setActiveClassId(e.target.value)}
+                      className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-900 focus:border-blue-800 focus:outline-none"
+                    >
+                      {scopedClasses.map((cls) => (
+                        <option key={cls.id} value={cls.id}>
+                          {cls.name} ({cls.level === 'olevel' ? "O'Level CBC" : "A'Level"})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              {activeExam && (
+                <div className="flex items-center gap-2 text-xs text-slate-500">
+                  <span>{activeExam.term}</span>
+                  <span aria-hidden="true">·</span>
+                  <span className="font-medium text-slate-700">
+                    {activeExam.published
+                      ? 'Published'
+                      : activeExam.locked
+                        ? 'Locked'
+                        : 'Open for entry'}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+        {/* Main Viewport (Keyed strictly by activeSchoolId for complete UI state isolation) */}
+        <main key={activeSchoolId ?? 'default'} className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-4">
+          {errorBanner && (
+            <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 flex items-center gap-2 no-print">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{errorBanner}</span>
+            </div>
+          )}
+
+          {effectiveTab === 'billing' && activeSchool && (
+            <BillingView
+              school={activeSchool}
+              activeStudentsCount={db.students.filter((s) => s.status === 'active').length}
+              invoices={db.invoices ?? []}
+              onRefreshStatus={refreshTenantWorkspace}
+              onLogout={() => void signOutWorkspace()}
+            />
+          )}
+
+          {effectiveTab === 'dashboard' && activeExam && (
+            <DashboardView
+              db={db}
+              currentUser={currentUser}
+              activeExam={activeExam}
+              curriculumScope={effectiveCurriculumScope}
+              onNavigate={safeNavigate}
+              onSelectClassAndNavigate={(cid, tab) => {
+                setActiveClassId(cid);
+                safeNavigate(tab);
+              }}
+            />
+          )}
+
+          {effectiveTab === 'students' && (
+            <StudentsView
+              students={db.students}
+              classes={db.classes}
+              combinations={db.combinations}
+              schoolName={db.settings.schoolName}
+              academicYear={db.settings.academicYear}
+              userRole={currentUser.role}
+              curriculumScope={effectiveCurriculumScope}
+              onAddStudent={(stu: StudentProfile) => {
+                void runPersist(async () => {
+                  await tenantApi.addStudents([stu]);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    students: [...prev.students, stu],
+                  }));
+                  setNotice(`Registered student ${stu.fullName} (${stu.admissionNo}).`);
+                }, 'Failed to register student.');
+              }}
+              onBulkAddStudents={(list: StudentProfile[]) => {
+                void runPersist(async () => {
+                  await tenantApi.addStudents(list);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    students: [...prev.students, ...list],
+                  }));
+                  setNotice(`Imported ${list.length} new student(s).`);
+                }, 'Failed to import students.');
+              }}
+              onUpdateStudent={(stu: StudentProfile) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  students: prev.students.map((s) => (s.id === stu.id ? stu : s)),
+                }));
+                setNotice(`Updated record for ${stu.fullName}.`);
+                void runPersist(() => tenantApi.updateStudent(stu), 'Failed to update student.');
+              }}
+              onBulkPromote={(ids, targetClassId) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  students: prev.students.map((s) =>
+                    ids.includes(s.id) ? { ...s, classId: targetClassId } : s
+                  ),
+                }));
+                setNotice(`Promoted/transferred ${ids.length} student(s).`);
+                void runPersist(
+                  () => tenantApi.promoteStudents(ids, targetClassId),
+                  'Failed to promote students.'
+                );
+              }}
+              onViewHistory={(sid) => {
+                setSelectedStudentId(sid);
+                safeNavigate('academic-history');
+              }}
+              onViewReportCard={(cid, sid) => {
+                setActiveClassId(cid);
+                setSelectedStudentId(sid);
+                safeNavigate('reports');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'classes' && (
+            <ClassesView
+              classes={db.classes}
+              subjects={db.subjects}
+              combinations={db.combinations}
+              students={db.students}
+              users={db.users}
+              userRole={currentUser.role}
+              curriculumScope={effectiveCurriculumScope}
+              onAddClass={(cls: StreamClass) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  classes: [...prev.classes, cls],
+                  exams: prev.exams.map((ex) =>
+                    activeExam && ex.id === activeExam.id
+                      ? { ...ex, classIds: [...ex.classIds, cls.id] }
+                      : ex
+                  ),
+                }));
+                setNotice(`Added class ${cls.name}.`);
+                void runPersist(
+                  () => tenantApi.saveClass(cls, activeExam?.id),
+                  'Failed to save class.'
+                );
+              }}
+              onUpdateClass={(cls: StreamClass) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  classes: prev.classes.map((c) => (c.id === cls.id ? cls : c)),
+                }));
+                void runPersist(() => tenantApi.saveClass(cls), 'Failed to update class.');
+              }}
+              onAddCombination={(combo: SubjectCombination) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  combinations: [...prev.combinations, combo],
+                }));
+                setNotice(`Added combination ${combo.code}.`);
+                void runPersist(
+                  () => tenantApi.saveCombination(combo),
+                  'Failed to save combination.'
+                );
+              }}
+              onDeleteCombination={(comboId: string) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  combinations: prev.combinations.filter((c) => c.id !== comboId),
+                }));
+                void runPersist(
+                  () => tenantApi.deleteCombination(comboId),
+                  'Failed to delete combination.'
+                );
+              }}
+            />
+          )}
+
+          {effectiveTab === 'subjects' && (
+            <SubjectsView
+              subjects={db.subjects}
+              userRole={currentUser.role}
+              curriculumScope={effectiveCurriculumScope}
+              onAddSubject={(sub: SubjectDefinition) => {
+                updateLocalTenantDb((prev) => ({ ...prev, subjects: [...prev.subjects, sub] }));
+                setNotice(`Added subject ${sub.name} (${sub.code}).`);
+                void runPersist(() => tenantApi.saveSubject(sub), 'Failed to save subject.');
+              }}
+              onUpdateSubject={(sub: SubjectDefinition) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  subjects: prev.subjects.map((s) => (s.id === sub.id ? sub : s)),
+                }));
+                setNotice(`Updated subject ${sub.name}.`);
+                void runPersist(() => tenantApi.saveSubject(sub), 'Failed to update subject.');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'teachers' && activeExam && (
+            <TeachersView
+              users={db.users}
+              classes={db.classes}
+              subjects={db.subjects}
+              marksheets={db.marksheets}
+              activeExam={activeExam}
+            />
+          )}
+
+          {effectiveTab === 'examinations' && activeExam && (
+            <ExaminationsView
+              exams={db.exams}
+              activeExamId={activeExam.id}
+              classes={db.classes}
+              marksheets={db.marksheets}
+              academicYear={db.settings.academicYear}
+              termName={db.settings.termName}
+              userRole={currentUser.role}
+              curriculumScope={effectiveCurriculumScope}
+              onSelectExam={setActiveExamId}
+              onAddExam={(ex: ExaminationPeriod) => {
+                updateLocalTenantDb((prev) => ({ ...prev, exams: [...prev.exams, ex] }));
+                setNotice(`Created examination period "${ex.name}".`);
+                void runPersist(() => tenantApi.saveExam(ex), 'Failed to create examination.');
+              }}
+              onUpdateExam={(ex: ExaminationPeriod) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  exams: prev.exams.map((item) => (item.id === ex.id ? ex : item)),
+                }));
+                setNotice(`Updated "${ex.name}".`);
+                void runPersist(() => tenantApi.saveExam(ex), 'Failed to update examination.');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'marks-entry' && activeExam && activeClass && (
+            <MarksEntryView
+              currentUser={currentUser}
+              activeExam={activeExam}
+              activeClass={activeClass}
+              classes={scopedClasses}
+              subjects={db.subjects}
+              combinations={db.combinations}
+              students={db.students}
+              marksheets={db.marksheets}
+              settings={db.settings}
+              onSelectClass={setActiveClassId}
+              onSaveMarksheetEntries={handleSaveMarksheetEntries}
+              onSubmitMarksheet={handleSubmitMarksheet}
+            />
+          )}
+
+          {effectiveTab === 'marksheets' && activeExam && (
+            <MarksheetsApprovalView
+              currentUser={currentUser}
+              activeExam={activeExam}
+              classes={scopedClasses}
+              subjects={db.subjects}
+              students={db.students}
+              users={db.users}
+              marksheets={db.marksheets}
+              settings={db.settings}
+              onApproveMarksheet={handleApproveMarksheet}
+              onReturnMarksheet={handleReturnMarksheet}
+              onReopenMarksheet={handleReopenMarksheet}
+              onPublishAllApproved={handlePublishAllApproved}
+            />
+          )}
+
+          {effectiveTab === 'results-analysis' && activeExam && activeClass && (
+            <ResultsAnalysisView
+              db={db}
+              activeExam={activeExam}
+              activeClassId={activeClass.id}
+              onSelectClass={setActiveClassId}
+              onOpenReportCard={(studentId) => {
+                setSelectedStudentId(studentId);
+                safeNavigate('reports');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'reports' && activeExam && activeClass && (
+            <ReportCardsView
+              db={db}
+              activeExam={activeExam}
+              activeClassId={activeClass.id}
+              userRole={currentUser.role}
+              selectedStudentId={selectedStudentId}
+              onSelectClass={setActiveClassId}
+              onSelectStudent={setSelectedStudentId}
+              onUpdateSettings={(updated: SchoolSettings) => {
+                const resolvedLogo =
+                  updated.reportLayout.customLogoDataUrl ?? updated.badgeDataUrl ?? null;
+                const synced: SchoolSettings = {
+                  ...updated,
+                  badgeDataUrl: resolvedLogo ?? undefined,
+                };
+                updateLocalTenantDb((prev) => ({ ...prev, settings: synced }));
+                updateLocalActiveSchool((prev) => ({
+                  ...prev,
+                  logoUrl: resolvedLogo,
+                }));
+                void runPersist(
+                  () => tenantApi.saveSettings(synced),
+                  'Failed to save report card template.'
+                );
+              }}
+              onUpdateStudentRemark={(examId, studentId, field, value) => {
+                const key = `${examId}:${studentId}`;
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  studentRemarks: {
+                    ...prev.studentRemarks,
+                    [key]: {
+                      ...prev.studentRemarks[key],
+                      [field]: value,
+                    },
+                  },
+                }));
+                void runPersist(
+                  () => tenantApi.saveRemark(examId, studentId, field, value),
+                  'Failed to save student remark.'
+                );
+              }}
+              onUpdateStudentPhoto={(studentId, photoDataUrl) => {
+                const target = db.students.find((s) => s.id === studentId);
+                if (!target) return;
+                const updatedStu = { ...target, photoDataUrl };
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  students: prev.students.map((s) => (s.id === studentId ? updatedStu : s)),
+                }));
+                void runPersist(
+                  () => tenantApi.updateStudent(updatedStu),
+                  'Failed to save student photo.'
+                );
+              }}
+              onIncrementReportsPrinted={(count) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  reportsGeneratedCount: prev.reportsGeneratedCount + count,
+                }));
+                void runPersist(
+                  () => tenantApi.trackReports(count),
+                  'Failed to record printed report count.'
+                );
+              }}
+            />
+          )}
+
+          {effectiveTab === 'academic-history' && (
+            <AcademicHistoryView
+              db={db}
+              selectedStudentId={selectedStudentId}
+              onSelectStudent={setSelectedStudentId}
+              onOpenReportCard={(classId, studentId, examId) => {
+                setActiveExamId(examId);
+                setActiveClassId(classId);
+                setSelectedStudentId(studentId);
+                safeNavigate('reports');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'settings' && (
+            <SettingsView
+              settings={db.settings}
+              curriculumScope={effectiveCurriculumScope}
+              db={db}
+              onUpdateSettings={(updated) => {
+                const resolvedLogo =
+                  updated.badgeDataUrl !== undefined
+                    ? updated.badgeDataUrl || null
+                    : updated.reportLayout.customLogoDataUrl ?? null;
+                const resolvedPrimary = normalizeHexColor(
+                  updated.uniformPrimaryColor,
+                  DEFAULT_UNIFORM_PRIMARY
+                );
+                const resolvedSecondary = normalizeHexColor(
+                  updated.uniformSecondaryColor,
+                  DEFAULT_UNIFORM_SECONDARY
+                );
+                const normalizedSettings: SchoolSettings = {
+                  ...updated,
+                  badgeDataUrl: resolvedLogo ?? undefined,
+                  uniformPrimaryColor: resolvedPrimary,
+                  uniformSecondaryColor: resolvedSecondary,
+                  reportLayout: {
+                    ...updated.reportLayout,
+                    customLogoDataUrl: resolvedLogo ?? undefined,
+                    crestType:
+                      resolvedLogo && updated.reportLayout.crestType !== 'custom'
+                        ? 'custom'
+                        : !resolvedLogo && updated.reportLayout.crestType === 'custom'
+                          ? 'shield'
+                          : updated.reportLayout.crestType,
+                  },
+                };
+
+                updateLocalTenantDb((prev) => ({ ...prev, settings: normalizedSettings }));
+                updateLocalActiveSchool((prev) => ({
+                  ...prev,
+                  name: normalizedSettings.schoolName || prev.name,
+                  logoUrl: resolvedLogo,
+                  primaryColor: resolvedPrimary,
+                  secondaryColor: resolvedSecondary,
+                  curriculumScope: normalizedSettings.curriculumScope ?? prev.curriculumScope,
+                }));
+                setNotice('School profile, badge, uniform colors & grading rules saved.');
+                void runPersist(
+                  () => tenantApi.saveSettings(normalizedSettings),
+                  'Failed to save school configuration.'
+                );
+              }}
+              onRestoreDatabase={(restored) => {
+                updateLocalTenantDb(() => restored);
+                setNotice('School snapshot loaded into workspace.');
+              }}
+              onResetSampleData={() => {
+                void refreshTenantWorkspace();
+                setNotice('Reloaded workspace data from server.');
+              }}
+            />
+          )}
+
+          {effectiveTab === 'users' && (
+            <UserManagementView
+              users={db.users}
+              loginActivity={db.loginActivity}
+              classes={db.classes}
+              subjects={db.subjects}
+              schoolName={db.settings.schoolName}
+              currentUserId={currentUser.id}
+              onAddUser={(u) => {
+                const scopedUser = {
+                  ...u,
+                  id: u.id.includes(':') ? u.id : `${activeSchoolId}:${u.id}`,
+                };
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  users: [...prev.users, { ...scopedUser, password: '********' }],
+                }));
+                setNotice(`Created staff account for ${u.name}.`);
+                void runPersist(
+                  () => tenantApi.saveStaff(scopedUser),
+                  'Failed to create staff account.'
+                );
+              }}
+              onBulkAddUsers={(list) => {
+                const scopedList = list.map((u) => ({
+                  ...u,
+                  id: u.id.includes(':') ? u.id : `${activeSchoolId}:${u.id}`,
+                }));
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  users: [
+                    ...prev.users,
+                    ...scopedList.map((u) => ({ ...u, password: '********' })),
+                  ],
+                }));
+                setNotice(`Imported ${scopedList.length} staff account(s).`);
+                void runPersist(
+                  () => tenantApi.bulkSaveStaff(scopedList),
+                  'Failed to bulk-import staff accounts.'
+                );
+              }}
+              onUpdateUser={(u) => {
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  users: prev.users.map((item) =>
+                    item.id === u.id ? { ...u, password: '********' } : item
+                  ),
+                }));
+                setNotice(`Updated account for ${u.name}.`);
+                void runPersist(
+                  () => tenantApi.saveStaff(u),
+                  'Failed to update staff account.'
+                );
+              }}
+              onResetPassword={() => {
+                setNotice('Use Edit on the staff row to assign a new password.');
+              }}
+            />
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}

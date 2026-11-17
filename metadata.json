@@ -1,0 +1,8 @@
+{
+  "name": "Remix SchuleFlow",
+  "description": "School examination marksheet validation, automated result calculation, individual student report cards, and class performance summaries.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
