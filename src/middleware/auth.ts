@@ -1,17 +1,17 @@
 import type { NextFunction, Request, Response } from 'express';
+import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { eq } from 'drizzle-orm';
-import type { DecodedIdToken } from 'firebase-admin/auth';
 import { db } from '../db/index.ts';
 import { schools } from '../db/schema.ts';
 import { ensureInitialTenantsSeeded } from '../db/seed.ts';
 import { getOrCreateUser, getUserProfileByUid } from '../db/users.ts';
-import { adminAuth } from '../lib/firebase-admin.ts';
 import { isLocalSessionToken, verifySessionToken } from '../lib/passwordAuth.ts';
+import { createSupabaseServerClient } from '../lib/supabase.ts';
 import type { AuthSessionProfile, SchoolTenant, UserRole } from '../types.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: SupabaseUser;
   dbUser?: AuthSessionProfile;
   schoolId?: string;
   school?: SchoolTenant;
@@ -74,7 +74,11 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
   }
 
-  const token = authHeader.split('Bearer ')[1];
+  const token = authHeader.slice('Bearer '.length).trim();
+  if (!token) {
+    return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
+  }
+
   try {
     await ensureInitialTenantsSeeded();
 
@@ -90,14 +94,23 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
         return res.status(401).json({ error: 'Unauthorized: User account no longer exists.' });
       }
     } else {
-      const decodedToken = await adminAuth.verifyIdToken(token);
-      req.user = decodedToken;
-      const email = decodedToken.email ?? `${decodedToken.uid}@schuleflow.local`;
-      dbUser = await getOrCreateUser(
-        decodedToken.uid,
-        email,
-        typeof decodedToken.name === 'string' ? decodedToken.name : undefined
-      );
+      const supabaseServer = createSupabaseServerClient();
+      const { data, error } = await supabaseServer.auth.getUser(token);
+      if (error || !data?.user) {
+        return res.status(401).json({ error: 'Unauthorized: Invalid or expired session token' });
+      }
+
+      req.user = data.user;
+      const email = data.user.email ?? `${data.user.id}@schuleflow.local`;
+      const meta = data.user.user_metadata as Record<string, unknown> | undefined;
+      const displayName =
+        typeof meta?.full_name === 'string'
+          ? meta.full_name
+          : typeof meta?.name === 'string'
+            ? meta.name
+            : undefined;
+
+      dbUser = await getOrCreateUser(data.user.id, email, displayName);
     }
 
     if (!dbUser.active) {

@@ -97,7 +97,7 @@ export default function App() {
     recentAccounts,
     removeRecentAccount,
     signInWithCredentials,
-    signInWithGoogle,
+    signUpWithEmail,
     signOutWorkspace,
     refreshPlatformData,
     refreshTenantWorkspace,
@@ -272,7 +272,7 @@ export default function App() {
         recentAccounts={recentAccounts}
         onRemoveRecentAccount={removeRecentAccount}
         onCredentialSignIn={signInWithCredentials}
-        onGoogleSignIn={signInWithGoogle}
+        onSignUp={signUpWithEmail}
       />
     );
   }

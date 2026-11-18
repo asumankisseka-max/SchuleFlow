@@ -1,41 +1,54 @@
-import { drizzle } from 'drizzle-orm/node-postgres';
-import { Pool } from 'pg';
+import { drizzle } from 'drizzle-orm/postgres-js';
+import postgres from 'postgres';
 import * as schema from './schema.ts';
 
+type PostgresClient = ReturnType<typeof postgres>;
+
 declare global {
-  var _postgresPool: Pool | undefined;
+  var _postgresClient: PostgresClient | undefined;
 }
 
-export const createPool = () => {
-  if (!global._postgresPool) {
-    const connectionString = process.env.DATABASE_URL?.trim();
+function resolveConnectionUrl(): string {
+  const directUrl = process.env.DATABASE_URL?.trim();
+  if (directUrl) {
+    return directUrl;
+  }
 
-    global._postgresPool = connectionString
-      ? new Pool({
-          connectionString,
-          ssl:
-            connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
-              ? false
-              : { rejectUnauthorized: false },
-          max: 10,
-          connectionTimeoutMillis: 15000,
-        })
-      : new Pool({
-          host: process.env.SQL_HOST,
-          user: process.env.SQL_USER,
-          password: process.env.SQL_PASSWORD,
-          database: process.env.SQL_DB_NAME,
-          max: 10,
-          connectionTimeoutMillis: 15000,
-        });
+  const host = process.env.SQL_HOST?.trim();
+  const user = process.env.SQL_USER?.trim();
+  const password = process.env.SQL_PASSWORD?.trim();
+  const database = process.env.SQL_DB_NAME?.trim();
 
-    global._postgresPool.on('error', (err) => {
-      console.error('Unexpected error on idle SQL pool client:', err);
+  if (host && user && database) {
+    const encodedUser = encodeURIComponent(user);
+    const encodedPass = password ? `:${encodeURIComponent(password)}` : '';
+    if (host.startsWith('/')) {
+      return `postgres://${encodedUser}${encodedPass}@localhost/${encodeURIComponent(database)}?host=${encodeURIComponent(host)}`;
+    }
+    return `postgres://${encodedUser}${encodedPass}@${host}/${encodeURIComponent(database)}`;
+  }
+
+  throw new Error('DATABASE_URL must be set to connect to PostgreSQL / Supabase.');
+}
+
+export const createClient = (): PostgresClient => {
+  if (!global._postgresClient) {
+    const connectionString = resolveConnectionUrl();
+    const isLocal =
+      connectionString.includes('localhost') ||
+      connectionString.includes('127.0.0.1') ||
+      connectionString.includes('host=/');
+
+    global._postgresClient = postgres(connectionString, {
+      prepare: false,
+      max: 10,
+      connect_timeout: 15,
+      ssl: isLocal ? false : 'require',
     });
   }
-  return global._postgresPool;
+  return global._postgresClient;
 };
 
-const pool = createPool();
+const client = createClient();
 
-export const db = drizzle(pool, { schema });
+export const db = drizzle(client, { schema });

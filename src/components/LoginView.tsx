@@ -3,14 +3,16 @@ import {
   AlertCircle,
   BookOpenCheck,
   Building2,
+  CheckCircle2,
   Eye,
   EyeOff,
   Loader2,
   Lock,
   UserCheck,
+  UserPlus,
   X,
 } from 'lucide-react';
-import type { RememberedAccountHint } from '../context/SchoolContext';
+import type { RememberedAccountHint, SignUpResult } from '../context/SchoolContext';
 import type { PublicSchoolBranding } from '../types';
 import { platformApi } from '../utils/apiClient';
 import { buildSchoolThemeVars } from '../utils/schoolTheme';
@@ -26,7 +28,7 @@ interface LoginViewProps {
     password: string,
     options?: { schoolId?: string; rememberMe?: boolean }
   ) => Promise<void>;
-  onGoogleSignIn: () => Promise<void>;
+  onSignUp: (email: string, password: string, fullName?: string) => Promise<SignUpResult>;
 }
 
 export function LoginView({
@@ -35,14 +37,17 @@ export function LoginView({
   recentAccounts,
   onRemoveRecentAccount,
   onCredentialSignIn,
-  onGoogleSignIn,
+  onSignUp,
 }: LoginViewProps) {
+  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
+  const [fullName, setFullName] = useState('');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [selectedSchoolId, setSelectedSchoolId] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [signupMessage, setSignupMessage] = useState<string | null>(null);
   const [schoolCatalog, setSchoolCatalog] = useState<PublicSchoolBranding[]>([]);
 
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
@@ -94,6 +99,22 @@ export function LoginView({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!identifier.trim() || !password) return;
+    setSignupMessage(null);
+
+    if (authMode === 'signup') {
+      try {
+        const res = await onSignUp(identifier.trim(), password, fullName.trim() || undefined);
+        if (res.requiresEmailConfirmation) {
+          setSignupMessage(res.message);
+          setAuthMode('signin');
+          setPassword('');
+        }
+      } catch {
+        // Error surfaced cleanly via SchoolContext authError
+      }
+      return;
+    }
+
     await onCredentialSignIn(identifier.trim(), password, {
       schoolId: selectedSchoolId || undefined,
       rememberMe,
@@ -101,6 +122,8 @@ export function LoginView({
   };
 
   const handlePickRecentAccount = (account: RememberedAccountHint) => {
+    setAuthMode('signin');
+    setSignupMessage(null);
     setIdentifier(account.identifier);
     setSelectedSchoolId(account.schoolId ?? '');
     setPassword('');
@@ -140,9 +163,11 @@ export function LoginView({
               {selectedSchool ? selectedSchool.name : 'Welcome to SchuleFlow Portal'}
             </h1>
             <p className="text-sm text-slate-600 mt-1">
-              {selectedSchool
-                ? `${selectedSchool.district} · Sign in to your school workspace`
-                : 'Sign in with your email, phone number, username, or Google account'}
+              {authMode === 'signup'
+                ? 'Activate your institutional email login with Supabase Auth'
+                : selectedSchool
+                  ? `${selectedSchool.district} · Sign in to your school workspace`
+                  : 'Sign in with your email, phone number, or username'}
             </p>
           </div>
         </div>
@@ -155,6 +180,50 @@ export function LoginView({
               : undefined
           }
         >
+          {/* Sign In / Create Account Mode Switcher */}
+          <div className="grid grid-cols-2 rounded-lg border border-slate-200 bg-slate-100 p-1 text-xs font-semibold">
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                setAuthMode('signin');
+                setSignupMessage(null);
+              }}
+              className={`rounded-md py-2 transition-colors ${
+                authMode === 'signin'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                setAuthMode('signup');
+                setSignupMessage(null);
+              }}
+              className={`rounded-md py-2 transition-colors ${
+                authMode === 'signup'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              Register Email
+            </button>
+          </div>
+
+          {signupMessage && (
+            <div
+              role="status"
+              className="flex items-start gap-2.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-3 text-xs text-emerald-800"
+            >
+              <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
+              <span>{signupMessage}</span>
+            </div>
+          )}
+
           {error && (
             <div
               role="alert"
@@ -165,7 +234,7 @@ export function LoginView({
             </div>
           )}
 
-          {recentAccounts.length > 0 && (
+          {authMode === 'signin' && recentAccounts.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-slate-600 flex items-center gap-1.5">
@@ -220,13 +289,16 @@ export function LoginView({
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {schoolCatalog.length > 0 && (
+            {authMode === 'signin' && schoolCatalog.length > 0 && (
               <div>
                 <label
                   htmlFor="login-school"
                   className="block text-xs font-medium text-slate-700 mb-1.5"
                 >
-                  School <span className="text-slate-400 font-normal">(optional · preview &amp; quick username sign-in)</span>
+                  School{' '}
+                  <span className="text-slate-400 font-normal">
+                    (optional · preview &amp; quick username sign-in)
+                  </span>
                 </label>
                 <div className="relative">
                   <Building2
@@ -254,28 +326,53 @@ export function LoginView({
               </div>
             )}
 
+            {authMode === 'signup' && (
+              <div>
+                <label
+                  htmlFor="signup-fullname"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  Full Name
+                </label>
+                <input
+                  id="signup-fullname"
+                  type="text"
+                  autoComplete="name"
+                  disabled={loading}
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="e.g. Grace Namukasa"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                />
+              </div>
+            )}
+
             <div>
               <label
                 htmlFor="login-identifier"
                 className="block text-xs font-medium text-slate-700 mb-1.5"
               >
-                {selectedSchool
-                  ? 'Username, Phone Number, or Email'
-                  : 'Email Address, Phone Number, or Username'}
+                {authMode === 'signup'
+                  ? 'Assigned Staff Email Address'
+                  : selectedSchool
+                    ? 'Username, Phone Number, or Email'
+                    : 'Email Address, Phone Number, or Username'}
               </label>
               <input
                 ref={identifierInputRef}
                 id="login-identifier"
-                type="text"
-                autoComplete="username"
+                type={authMode === 'signup' ? 'email' : 'text'}
+                autoComplete={authMode === 'signup' ? 'email' : 'username'}
                 required
                 disabled={loading}
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
                 placeholder={
-                  selectedSchool
-                    ? `e.g. admin, dos, 0772110401, or name@${selectedSchool.subdomain}.ac.ug`
-                    : 'name@school.ac.ug, 0772110401, or username'
+                  authMode === 'signup'
+                    ? 'staff@yourschool.ac.ug'
+                    : selectedSchool
+                      ? `e.g. admin, dos, 0772110401, or name@${selectedSchool.subdomain}.ac.ug`
+                      : 'name@school.ac.ug, 0772110401, or username'
                 }
                 className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
               />
@@ -289,26 +386,31 @@ export function LoginView({
                 >
                   Password
                 </label>
-                <button
-                  type="button"
-                  disabled={loading}
-                  onClick={() => setRecoveryOpen(true)}
-                  className="text-xs font-medium text-blue-800 hover:text-blue-950 hover:underline"
-                >
-                  Forgot login info?
-                </button>
+                {authMode === 'signin' && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => setRecoveryOpen(true)}
+                    className="text-xs font-medium text-blue-800 hover:text-blue-950 hover:underline"
+                  >
+                    Forgot login info?
+                  </button>
+                )}
               </div>
               <div className="relative">
                 <input
                   ref={passwordInputRef}
                   id="login-password"
                   type={showPassword ? 'text' : 'password'}
-                  autoComplete="current-password"
+                  autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
                   required
+                  minLength={authMode === 'signup' ? 6 : undefined}
                   disabled={loading}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter your password"
+                  placeholder={
+                    authMode === 'signup' ? 'Create a password (min. 6 characters)' : 'Enter your password'
+                  }
                   className="w-full rounded-lg border border-slate-300 bg-white pl-3.5 pr-10 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                 />
                 <button
@@ -322,16 +424,18 @@ export function LoginView({
               </div>
             </div>
 
-            <label className="flex items-center gap-2 text-xs text-slate-600 select-none cursor-pointer">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                disabled={loading}
-                onChange={(e) => setRememberMe(e.target.checked)}
-                className="h-3.5 w-3.5 rounded border-slate-300"
-              />
-              <span>Keep me signed in on this device</span>
-            </label>
+            {authMode === 'signin' && (
+              <label className="flex items-center gap-2 text-xs text-slate-600 select-none cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  disabled={loading}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="h-3.5 w-3.5 rounded border-slate-300"
+                />
+                <span>Keep me signed in on this device</span>
+              </label>
+            )}
 
             <button
               type="submit"
@@ -340,47 +444,22 @@ export function LoginView({
             >
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : authMode === 'signup' ? (
+                <UserPlus className="h-4 w-4" aria-hidden="true" />
               ) : (
                 <Lock className="h-4 w-4" aria-hidden="true" />
               )}
-              <span>{loading ? 'Signing in...' : 'Sign In'}</span>
+              <span>
+                {loading
+                  ? authMode === 'signup'
+                    ? 'Creating account...'
+                    : 'Signing in...'
+                  : authMode === 'signup'
+                    ? 'Register Account'
+                    : 'Sign In'}
+              </span>
             </button>
           </form>
-
-          <div className="relative flex items-center py-1">
-            <div className="flex-grow border-t border-slate-200" />
-            <span className="mx-3 shrink text-[11px] font-medium uppercase tracking-wider text-slate-400">
-              or
-            </span>
-            <div className="flex-grow border-t border-slate-200" />
-          </div>
-
-          <button
-            type="button"
-            disabled={loading}
-            onClick={onGoogleSignIn}
-            className="flex w-full items-center justify-center gap-2.5 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 hover:border-slate-400 disabled:opacity-60 transition-colors"
-          >
-            <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                fill="#4285F4"
-                d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
-              />
-              <path
-                fill="#34A853"
-                d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
-              />
-              <path
-                fill="#FBBC05"
-                d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
-              />
-              <path
-                fill="#EA4335"
-                d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
-              />
-            </svg>
-            <span>Continue with Institutional Google Account</span>
-          </button>
         </div>
 
         <p className="text-center text-xs text-slate-500">
@@ -393,6 +472,7 @@ export function LoginView({
         initialIdentifier={identifier}
         onClose={() => setRecoveryOpen(false)}
         onRecoveredSignInHint={(recoveredIdentifier) => {
+          setAuthMode('signin');
           setIdentifier(recoveredIdentifier);
           setPassword('');
           requestAnimationFrame(() => passwordInputRef.current?.focus());
