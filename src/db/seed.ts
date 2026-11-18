@@ -17,7 +17,7 @@ import type {
 } from '../types.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 import { normalizeStoredPhone } from '../utils/validation.ts';
-import { db } from './index.ts';
+import { db, ensureReachableDbConnection } from './index.ts';
 import {
   classesStreams,
   examinations,
@@ -135,6 +135,7 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
   if (!seedPromise) {
     seedPromise = (async () => {
       try {
+        await ensureReachableDbConnection();
         const existing = await db.select({ id: schools.id }).from(schools).limit(1);
         if (existing.length === 0) {
           await seedKampalaHorizon();
@@ -144,6 +145,16 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
       } catch (error) {
         seedPromise = null;
         console.error('Failed to seed initial multi-tenant database:', error);
+        const pgCode =
+          typeof error === 'object' && error !== null && 'code' in error
+            ? String((error as { code?: unknown }).code ?? '')
+            : '';
+        if (pgCode === '42P01') {
+          throw new Error(
+            'Database schema is not initialized (missing tables). Run Drizzle schema push first.',
+            { cause: error }
+          );
+        }
         throw new Error('Failed to initialize multi-school tenant records.', { cause: error });
       }
     })();

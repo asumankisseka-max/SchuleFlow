@@ -86,10 +86,27 @@ async function requestJson<T>(
 }
 
 export const platformApi = {
+  getAuthConfig: () =>
+    requestJson<{ supabaseUrl: string | null; supabaseAnonKey: string | null }>(
+      '/api/v1/auth/config',
+      { method: 'GET' },
+      null
+    ),
+
   listPublicSchoolBranding: () =>
     requestJson<{ schools: PublicSchoolBranding[] }>(
       '/api/v1/auth/schools-branding',
       { method: 'GET' },
+      null
+    ),
+
+  registerEmail: (email: string, password: string, fullName?: string) =>
+    requestJson<{ token: string; user: AuthSessionProfile; schools: SchoolTenant[] }>(
+      '/api/v1/auth/register',
+      {
+        method: 'POST',
+        body: JSON.stringify({ email, password, ...(fullName ? { fullName } : {}) }),
+      },
       null
     ),
 

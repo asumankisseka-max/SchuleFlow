@@ -397,6 +397,13 @@ export async function authenticateWithCredentials(
         ? normalizeUserRole(matchedStaff.role)
         : normalizeUserRole(row.schoolRole);
 
+      if (matchedStaff) {
+        await db
+          .update(staffTeachers)
+          .set({ lastLogin: new Date().toISOString() })
+          .where(eq(staffTeachers.id, matchedStaff.id));
+      }
+
       const updated = await db
         .update(users)
         .set({
@@ -455,6 +462,11 @@ export async function authenticateWithCredentials(
         .limit(1);
 
       if (existingByEmail[0]) {
+        await db
+          .update(staffTeachers)
+          .set({ lastLogin: new Date().toISOString() })
+          .where(eq(staffTeachers.id, staff.id));
+
         const updated = await db
           .update(users)
           .set({
@@ -468,6 +480,11 @@ export async function authenticateWithCredentials(
           .returning();
         return toProfile(updated[0]);
       }
+
+      await db
+        .update(staffTeachers)
+        .set({ lastLogin: new Date().toISOString() })
+        .where(eq(staffTeachers.id, staff.id));
 
       const localUid = staff.id.includes(':')
         ? `local:${staff.id}`
@@ -503,6 +520,174 @@ export async function authenticateWithCredentials(
   }
 
   return null;
+}
+
+export async function registerAssignedStaffEmail(
+  email: string,
+  password: string,
+  fullName?: string
+): Promise<AuthSessionProfile> {
+  const cleanEmail = email.trim().toLowerCase();
+  const trimmedPassword = password.trim();
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    throw new Error('Please enter a valid email address.');
+  }
+  if (trimmedPassword.length < 6) {
+    throw new Error('Password must be at least 6 characters.');
+  }
+
+  const [existingUserRows, matchedStaff, superAdmins] = await Promise.all([
+    db
+      .select()
+      .from(users)
+      .where(sql`lower(trim(${users.email})) = ${cleanEmail}`)
+      .limit(5),
+    findMatchingStaffByEmail(cleanEmail),
+    db.select({ id: users.id }).from(users).where(eq(users.globalRole, 'super_admin')).limit(1),
+  ]);
+
+  const existingUser =
+    existingUserRows.find((u) => u.globalRole === 'super_admin') ??
+    existingUserRows.find((u) => u.active && Boolean(u.schoolId)) ??
+    existingUserRows[0];
+
+  const isExistingSuperAdmin =
+    isEnvSuperAdminEmail(cleanEmail) || existingUser?.globalRole === 'super_admin';
+  if (isExistingSuperAdmin) {
+    throw new Error('An account with this email already exists. Please sign in instead.');
+  }
+
+  // First-time platform bootstrap super admin only when no super_admin and no staff record exist
+  if (superAdmins.length === 0 && !matchedStaff && !existingUser) {
+    const fallbackName = fullName?.trim() || cleanEmail.split('@')[0] || 'Platform Super Admin';
+    const nextHash = hashPassword(trimmedPassword);
+    const inserted = await db
+      .insert(users)
+      .values({
+        uid: `registered:super_admin:${cleanEmail}`,
+        email: cleanEmail,
+        username: cleanEmail.split('@')[0],
+        passwordHash: nextHash,
+        name: fallbackName,
+        globalRole: 'super_admin',
+        schoolId: null,
+        schoolRole: 'school_admin',
+        active: true,
+        lastLogin: new Date(),
+      })
+      .returning();
+    return toProfile(inserted[0]);
+  }
+
+  if (matchedStaff && !matchedStaff.active) {
+    throw new Error('Account deactivated. Please contact your School Administrator.');
+  }
+  if (existingUser && !existingUser.active && !matchedStaff) {
+    throw new Error('Account deactivated. Please contact your School Administrator.');
+  }
+
+  const resolvedSchoolId = matchedStaff?.schoolId ?? existingUser?.schoolId ?? null;
+  if (!resolvedSchoolId) {
+    throw new Error(
+      'Account not assigned to an active school workspace. Contact your School Administrator to add your email first.'
+    );
+  }
+
+  const schoolCheck = await db
+    .select({ id: schools.id })
+    .from(schools)
+    .where(eq(schools.id, resolvedSchoolId))
+    .limit(1);
+  if (!schoolCheck[0]) {
+    throw new Error(
+      'Account not assigned to an active school workspace. Contact your School Administrator.'
+    );
+  }
+
+  const currentHash = matchedStaff?.passwordHash ?? existingUser?.passwordHash ?? null;
+  const hasActivatedLogin = Boolean(
+    matchedStaff?.lastLogin || existingUser?.uid.startsWith('registered:')
+  );
+  const hasCustomPassword = Boolean(
+    currentHash && !verifyPassword('SchuleFlow2026!', currentHash)
+  );
+
+  if (hasActivatedLogin || hasCustomPassword) {
+    throw new Error(
+      'An account with this email is already registered. Please sign in instead or use "Forgot login info?".'
+    );
+  }
+
+  const nextHash = hashPassword(trimmedPassword);
+  const resolvedRole = normalizeUserRole(matchedStaff?.role ?? existingUser?.schoolRole);
+  const resolvedName = fullName?.trim() || matchedStaff?.name || existingUser?.name || cleanEmail.split('@')[0];
+  const resolvedUsername =
+    matchedStaff?.username?.toLowerCase() ??
+    existingUser?.username ??
+    cleanEmail.split('@')[0];
+  const resolvedPhone = normalizeStoredPhone(matchedStaff?.phone ?? existingUser?.phone);
+  const nowIso = new Date().toISOString();
+
+  if (matchedStaff) {
+    await db
+      .update(staffTeachers)
+      .set({
+        passwordHash: nextHash,
+        name: resolvedName,
+        lastLogin: nowIso,
+      })
+      .where(eq(staffTeachers.id, matchedStaff.id));
+  }
+
+  if (existingUser) {
+    const updated = await db
+      .update(users)
+      .set({
+        uid: existingUser.uid,
+        email: cleanEmail,
+        username: resolvedUsername,
+        phone: resolvedPhone,
+        passwordHash: nextHash,
+        name: resolvedName,
+        globalRole: 'school_user',
+        schoolId: resolvedSchoolId,
+        schoolRole: resolvedRole,
+        active: true,
+        lastLogin: new Date(),
+      })
+      .where(eq(users.id, existingUser.id))
+      .returning();
+    return toProfile(updated[0]);
+  }
+
+  const uid = matchedStaff
+    ? `local:${matchedStaff.id}`
+    : `registered:${resolvedSchoolId}:${cleanEmail}`;
+  const inserted = await db
+    .insert(users)
+    .values({
+      uid,
+      email: cleanEmail,
+      username: resolvedUsername,
+      phone: resolvedPhone,
+      passwordHash: nextHash,
+      name: resolvedName,
+      globalRole: 'school_user',
+      schoolId: resolvedSchoolId,
+      schoolRole: resolvedRole,
+      active: true,
+      lastLogin: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: users.uid,
+      set: {
+        passwordHash: nextHash,
+        name: resolvedName,
+        lastLogin: new Date(),
+      },
+    })
+    .returning();
+  return toProfile(inserted[0]);
 }
 
 export async function updateUserTenantRole(

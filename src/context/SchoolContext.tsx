@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { User as SupabaseUser } from '@supabase/supabase-js';
-import { isSupabaseConfigured, supabase } from '../lib/supabase';
+import { getSupabaseClient, setRuntimeSupabaseConfig } from '../lib/supabase';
 import type {
   AuditLogRecord,
   AuthSessionProfile,
@@ -221,10 +221,11 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     if (localTokenRef.current) {
       return localTokenRef.current;
     }
-    if (!supabase) {
+    const client = getSupabaseClient();
+    if (!client) {
       return null;
     }
-    const { data } = await supabase.auth.getSession();
+    const { data } = await client.auth.getSession();
     return data.session?.access_token ?? null;
   }, []);
 
@@ -462,8 +463,81 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   // Restore stored credential session or active Supabase Auth session on mount
   useEffect(() => {
     let active = true;
+    let unsubscribeAuthListener: (() => void) | null = null;
+
+    const attachSupabaseListener = () => {
+      const client = getSupabaseClient();
+      if (!client || unsubscribeAuthListener) return;
+      const { data: authListener } = client.auth.onAuthStateChange(async (_event, session) => {
+        if (!active) return;
+        setSupabaseUser(session?.user ?? null);
+
+        if (handlingManualSupabaseAuthRef.current) {
+          return;
+        }
+
+        if (!session?.user && localTokenRef.current) {
+          return;
+        }
+
+        if (!session?.user || !session.access_token) {
+          if (preserveAuthErrorOnSignOutRef.current) {
+            preserveAuthErrorOnSignOutRef.current = false;
+          } else {
+            setAuthError(null);
+          }
+          tenantCacheRef.current.clear();
+          setAuthProfile(null);
+          setSchools([]);
+          setAuditLogs([]);
+          setActiveSchoolId(null);
+          setDb(null);
+          setAuthLoading(false);
+          return;
+        }
+
+        setAuthError(null);
+        localTokenRef.current = null;
+        clearStoredToken();
+        setAuthLoading(true);
+        try {
+          configureApiClient(async () => session.access_token, null);
+          const synced = await platformApi.syncSession();
+          if (!active) return;
+          configureApiClient(getValidToken, null);
+          await applyAuthenticatedSession(synced.user, synced.schools);
+        } catch (err: unknown) {
+          if (!active) return;
+          setAuthError(formatFriendlyAuthError(err));
+          setAuthProfile(null);
+          setDb(null);
+          preserveAuthErrorOnSignOutRef.current = true;
+          await getSupabaseClient()?.auth.signOut().catch(() => undefined);
+        } finally {
+          if (active) setAuthLoading(false);
+        }
+      });
+      unsubscribeAuthListener = () => authListener.subscription.unsubscribe();
+    };
 
     const restoreSession = async () => {
+      let client = getSupabaseClient();
+      if (!client) {
+        try {
+          const cfg = await platformApi.getAuthConfig();
+          if (!active) return;
+          if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
+            client = setRuntimeSupabaseConfig(cfg.supabaseUrl, cfg.supabaseAnonKey);
+          }
+        } catch {
+          // Runtime Supabase config is optional; PostgreSQL credential & registration auth works without it
+        }
+      }
+
+      if (client) {
+        attachSupabaseListener();
+      }
+
       const storedToken = readStoredToken();
       if (storedToken) {
         localTokenRef.current = storedToken;
@@ -486,12 +560,12 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      if (!supabase) {
+      if (!client) {
         if (active) setAuthLoading(false);
         return;
       }
 
-      const { data } = await supabase.auth.getSession();
+      const { data } = await client.auth.getSession();
       if (!active) return;
       const session = data.session;
       setSupabaseUser(session?.user ?? null);
@@ -513,7 +587,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         setAuthProfile(null);
         setDb(null);
         preserveAuthErrorOnSignOutRef.current = true;
-        await supabase.auth.signOut().catch(() => undefined);
+        await client.auth.signOut().catch(() => undefined);
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -521,65 +595,9 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
 
     void restoreSession();
 
-    if (!supabase) {
-      return () => {
-        active = false;
-      };
-    }
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (!active) return;
-      setSupabaseUser(session?.user ?? null);
-
-      if (handlingManualSupabaseAuthRef.current) {
-        return;
-      }
-
-      if (!session?.user && localTokenRef.current) {
-        return;
-      }
-
-      if (!session?.user || !session.access_token) {
-        if (preserveAuthErrorOnSignOutRef.current) {
-          preserveAuthErrorOnSignOutRef.current = false;
-        } else {
-          setAuthError(null);
-        }
-        tenantCacheRef.current.clear();
-        setAuthProfile(null);
-        setSchools([]);
-        setAuditLogs([]);
-        setActiveSchoolId(null);
-        setDb(null);
-        setAuthLoading(false);
-        return;
-      }
-
-      setAuthError(null);
-      localTokenRef.current = null;
-      clearStoredToken();
-      setAuthLoading(true);
-      try {
-        configureApiClient(async () => session.access_token, null);
-        const synced = await platformApi.syncSession();
-        if (!active) return;
-        configureApiClient(getValidToken, null);
-        await applyAuthenticatedSession(synced.user, synced.schools);
-      } catch (err: unknown) {
-        if (!active) return;
-        setAuthError(formatFriendlyAuthError(err));
-        setAuthProfile(null);
-        setDb(null);
-        preserveAuthErrorOnSignOutRef.current = true;
-        await supabase?.auth.signOut().catch(() => undefined);
-      } finally {
-        if (active) setAuthLoading(false);
-      }
-    });
-
     return () => {
       active = false;
-      authListener.subscription.unsubscribe();
+      unsubscribeAuthListener?.();
     };
   }, [applyAuthenticatedSession, getValidToken]);
 
@@ -599,6 +617,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         clearStoredToken();
         configureApiClient(async () => null, null);
 
+        const supabaseClient = getSupabaseClient();
         try {
           const res = await platformApi.loginWithCredentials(
             trimmedIdentifier,
@@ -607,8 +626,8 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
           );
           localTokenRef.current = res.token;
           saveStoredToken(res.token, rememberMe);
-          if (supabase) {
-            await supabase.auth.signOut().catch(() => undefined);
+          if (supabaseClient) {
+            await supabaseClient.auth.signOut().catch(() => undefined);
           }
           configureApiClient(getValidToken, null);
           await applyAuthenticatedSession(res.user, res.schools, trimmedIdentifier);
@@ -618,7 +637,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
             backendErr instanceof ApiError &&
             backendErr.status === 401 &&
             trimmedIdentifier.includes('@') &&
-            Boolean(supabase);
+            Boolean(supabaseClient);
 
           if (!isEmailCredentialMismatch) {
             throw backendErr;
@@ -626,13 +645,13 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         }
 
         // Fallback to Supabase Auth signInWithPassword for Supabase-registered email accounts
-        if (!supabase) {
+        if (!supabaseClient) {
           throw new Error('Invalid email, phone number, or password.');
         }
 
         handlingManualSupabaseAuthRef.current = true;
         try {
-          const { data, error } = await supabase.auth.signInWithPassword({
+          const { data, error } = await supabaseClient.auth.signInWithPassword({
             email: trimmedIdentifier,
             password,
           });
@@ -650,7 +669,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
           await applyAuthenticatedSession(synced.user, synced.schools, trimmedIdentifier);
         } catch (supabaseErr: unknown) {
           preserveAuthErrorOnSignOutRef.current = true;
-          await supabase.auth.signOut().catch(() => undefined);
+          await supabaseClient.auth.signOut().catch(() => undefined);
           throw supabaseErr;
         } finally {
           handlingManualSupabaseAuthRef.current = false;
@@ -670,13 +689,6 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
 
   const signUpWithEmail = useCallback(
     async (email: string, password: string, fullName?: string): Promise<SignUpResult> => {
-      if (!isSupabaseConfigured || !supabase) {
-        const msg =
-          'Supabase Auth is not configured yet (set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY).';
-        setAuthError(msg);
-        throw new Error(msg);
-      }
-
       const cleanEmail = email.trim().toLowerCase();
       setAuthError(null);
       setAuthLoading(true);
@@ -686,7 +698,31 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         localTokenRef.current = null;
         clearStoredToken();
 
-        const { data, error } = await supabase.auth.signUp({
+        let supabaseClient = getSupabaseClient();
+        if (!supabaseClient) {
+          try {
+            const cfg = await platformApi.getAuthConfig();
+            if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
+              supabaseClient = setRuntimeSupabaseConfig(cfg.supabaseUrl, cfg.supabaseAnonKey);
+            }
+          } catch {
+            // Fall back cleanly to built-in PostgreSQL registration endpoint
+          }
+        }
+
+        if (!supabaseClient) {
+          const res = await platformApi.registerEmail(cleanEmail, password, fullName);
+          localTokenRef.current = res.token;
+          saveStoredToken(res.token, true);
+          configureApiClient(getValidToken, null);
+          await applyAuthenticatedSession(res.user, res.schools, cleanEmail);
+          return {
+            requiresEmailConfirmation: false,
+            message: 'Account activated and signed in.',
+          };
+        }
+
+        const { data, error } = await supabaseClient.auth.signUp({
           email: cleanEmail,
           password,
           ...(fullName?.trim() ? { options: { data: { full_name: fullName.trim() } } } : {}),
@@ -716,6 +752,8 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
           message: 'Account created and signed in.',
         };
       } catch (err: unknown) {
+        localTokenRef.current = null;
+        clearStoredToken();
         const friendly = formatFriendlyAuthError(err);
         setAuthError(friendly);
         throw new Error(friendly);
@@ -741,8 +779,9 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     setSubscriptionPortalData(null);
     setWorkspaceError(null);
     setAuthError(null);
-    if (supabase) {
-      await supabase.auth.signOut().catch(() => undefined);
+    const supabaseClient = getSupabaseClient();
+    if (supabaseClient) {
+      await supabaseClient.auth.signOut().catch(() => undefined);
     }
     if (typeof window !== 'undefined' && window.location.pathname !== '/') {
       window.history.pushState({}, '', '/');

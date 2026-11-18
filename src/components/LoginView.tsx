@@ -164,7 +164,7 @@ export function LoginView({
             </h1>
             <p className="text-sm text-slate-600 mt-1">
               {authMode === 'signup'
-                ? 'Activate your institutional email login with Supabase Auth'
+                ? 'Activate your assigned institutional email account'
                 : selectedSchool
                   ? `${selectedSchool.district} · Sign in to your school workspace`
                   : 'Sign in with your email, phone number, or username'}

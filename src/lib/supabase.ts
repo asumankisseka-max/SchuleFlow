@@ -7,9 +7,9 @@ const metaEnv = (
 const browserSupabaseUrl = metaEnv?.VITE_SUPABASE_URL?.trim() || '';
 const browserSupabaseAnonKey = metaEnv?.VITE_SUPABASE_ANON_KEY?.trim() || '';
 
-export const isSupabaseConfigured = Boolean(browserSupabaseUrl && browserSupabaseAnonKey);
+export let isSupabaseConfigured = Boolean(browserSupabaseUrl && browserSupabaseAnonKey);
 
-export const supabase: SupabaseClient | null = isSupabaseConfigured
+export let supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(browserSupabaseUrl, browserSupabaseAnonKey, {
       auth: {
         persistSession: true,
@@ -17,6 +17,31 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
       },
     })
   : null;
+
+export function setRuntimeSupabaseConfig(
+  url: string | null | undefined,
+  anonKey: string | null | undefined
+): SupabaseClient | null {
+  const cleanUrl = url?.trim() || '';
+  const cleanKey = anonKey?.trim() || '';
+  if (!cleanUrl || !cleanKey) {
+    return supabase;
+  }
+  if (!supabase) {
+    supabase = createClient(cleanUrl, cleanKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+      },
+    });
+    isSupabaseConfigured = true;
+  }
+  return supabase;
+}
+
+export function getSupabaseClient(): SupabaseClient | null {
+  return supabase;
+}
 
 export function createSupabaseServerClient(accessToken?: string): SupabaseClient {
   const url =

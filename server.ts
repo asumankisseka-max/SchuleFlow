@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 dotenv.config();
 import express from 'express';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -38,6 +39,7 @@ import {
   authenticateWithCredentials,
   listRecoverySchools,
   lookupRecoverableAccount,
+  registerAssignedStaffEmail,
   resetPasswordWithRecoveryToken,
   verifyRecoveryIdentity,
 } from './src/db/users.ts';
@@ -69,19 +71,26 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '10mb' }));
-app.use((req, _res, next) => {
-  if (req.url.startsWith('/.netlify/functions/api')) {
-    req.url = '/api' + req.url.slice('/.netlify/functions/api'.length);
-    if (req.url === '/api') {
-      req.url = '/api/';
-    }
-  }
-  next();
-});
 
   /* ------------------------------------------------------------------------ */
   /* Auth & Session Context Routes                                            */
   /* ------------------------------------------------------------------------ */
+  app.get('/api/v1/auth/config', (_req, res) => {
+    const supabaseUrl =
+      process.env.SUPABASE_URL?.trim() ||
+      process.env.VITE_SUPABASE_URL?.trim() ||
+      null;
+    const supabaseAnonKey =
+      process.env.SUPABASE_ANON_KEY?.trim() ||
+      process.env.VITE_SUPABASE_ANON_KEY?.trim() ||
+      null;
+
+    res.json({
+      supabaseUrl: supabaseUrl && supabaseAnonKey ? supabaseUrl : null,
+      supabaseAnonKey: supabaseUrl && supabaseAnonKey ? supabaseAnonKey : null,
+    });
+  });
+
   app.get('/api/v1/auth/schools-branding', async (_req, res) => {
     try {
       await ensureInitialTenantsSeeded();
@@ -90,6 +99,77 @@ app.use((req, _res, next) => {
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to load schools list.';
       res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/v1/auth/register', async (req, res) => {
+    try {
+      await ensureInitialTenantsSeeded();
+
+      const { email, password, fullName } = req.body as {
+        email?: string;
+        password?: string;
+        fullName?: string;
+      };
+
+      if (!email?.trim() || !password) {
+        return res.status(400).json({
+          error: 'Email address and password are required.',
+        });
+      }
+
+      const dbUser = await registerAssignedStaffEmail(email, password, fullName);
+
+      if (dbUser.globalRole !== 'super_admin') {
+        const gate = await checkSchoolSubscriptionGate(dbUser.schoolId);
+        if (!gate.allowed && !gate.expired) {
+          return res.status(403).json({
+            error: gate.reason || 'School subscription is suspended.',
+          });
+        }
+      }
+
+      const token = signSessionToken({
+        uid: dbUser.uid,
+        email: dbUser.email,
+        name: dbUser.name,
+        globalRole: dbUser.globalRole,
+        schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
+        schoolRole: dbUser.schoolRole,
+      });
+
+      const allSchools = await listAllSchoolsWithStats();
+      const accessibleSchools =
+        dbUser.globalRole === 'super_admin'
+          ? allSchools
+          : allSchools.filter((s) => s.id === dbUser.schoolId);
+
+      await recordAuditLog({
+        userId: dbUser.uid,
+        userEmail: dbUser.email,
+        userRole: dbUser.globalRole === 'super_admin' ? 'super_admin' : dbUser.schoolRole,
+        schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
+        action: 'USER_REGISTERED',
+        details: `${dbUser.name} activated institutional email login (${dbUser.email}).`,
+      });
+
+      res.json({
+        token,
+        user: dbUser,
+        schools: accessibleSchools,
+      });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : 'Registration failed.';
+      const lower = message.toLowerCase();
+      const status =
+        lower.includes('already exists') || lower.includes('already registered')
+          ? 409
+          : lower.includes('deactivated') || lower.includes('not assigned')
+            ? 403
+            : lower.includes('valid email') || lower.includes('at least 6') || lower.includes('required')
+              ? 400
+              : 500;
+      res.status(status).json({ error: message });
     }
   });
 
@@ -839,10 +919,27 @@ app.use((req, _res, next) => {
   );
 
 /* ------------------------------------------------------------------------ */
-/* Vite Dev Middleware / Production Static Asset Serving                    */
+/* Server Startup (Local Dev & Cloud Run — Skipped on Vercel Import)        */
 /* ------------------------------------------------------------------------ */
+function resolveRealPath(target: string): string {
+  try {
+    return fs.realpathSync(path.resolve(target));
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+const currentFilePath =
+  typeof import.meta !== 'undefined' && import.meta.url
+    ? resolveRealPath(fileURLToPath(import.meta.url))
+    : '';
+const entryFilePath = process.argv[1] ? resolveRealPath(process.argv[1]) : '';
+const isDirectExecution = Boolean(
+  currentFilePath && entryFilePath && currentFilePath === entryFilePath
+);
+
 async function startServer() {
-  if (process.env.NETLIFY) {
+  if (process.env.VERCEL || !isDirectExecution) {
     return;
   }
 
@@ -855,9 +952,7 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const currentDir = import.meta.url
-      ? path.dirname(fileURLToPath(import.meta.url))
-      : process.cwd();
+    const currentDir = currentFilePath ? path.dirname(currentFilePath) : process.cwd();
     const distPath = path.resolve(currentDir, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
@@ -870,7 +965,7 @@ async function startServer() {
   });
 }
 
-if (!process.env.NETLIFY) {
+if (!process.env.VERCEL && isDirectExecution) {
   startServer().catch((err) => {
     console.error('Fatal server startup error:', err);
     process.exit(1);
