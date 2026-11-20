@@ -69,12 +69,17 @@
 @media print {
   @page {
     size: A4 portrait;
-    margin: 12mm;
+    margin: 7mm 9mm;
   }
 
+  html,
   body {
+    margin: 0 !important;
+    padding: 0 !important;
     background: #ffffff !important;
     color: #0f172a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   .no-print {
@@ -85,7 +90,8 @@
     display: block !important;
   }
 
-  .print-page-break {
+  .print-page-break,
+  .report-page-break {
     break-after: page;
     page-break-after: always;
   }
@@ -93,5 +99,19 @@
   .print-avoid-break {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+
+  .report-card-sheet {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 10px 14px !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    font-size: 10.5px !important;
+    line-height: 1.28 !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    zoom: 0.94;
   }
 }

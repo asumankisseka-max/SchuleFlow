@@ -344,7 +344,7 @@ export function parseStudentDirectoryExcel(
     const rawGender = (genderCol >= 0 ? row[genderCol] : '').trim().toUpperCase();
     const gender: 'M' | 'F' = rawGender.startsWith('F') ? 'F' : 'M';
     const key = adm.toLowerCase();
-    const isDuplicate = !adm || existingAdmissions.has(key) || seen.has(key);
+    const isDuplicate = Boolean(key && (existingAdmissions.has(key) || seen.has(key)));
     if (key) seen.add(key);
 
     const rawContact = contactCol >= 0 ? (row[contactCol] ?? '').trim() : '';
@@ -369,12 +369,12 @@ export function parseStudentDirectoryExcel(
 
 export function downloadStudentImportTemplate(schoolName: string) {
   const wsData = [
-    [`${schoolName} — Student Directory Import Template`],
-    ['Admission No', 'Full Name', 'Gender (M/F)', 'Date of Birth (YYYY-MM-DD)', 'Parent/Guardian Name', 'Parent Contact (+256/07...)'],
-    ['KHHS/26/299', 'Kiggundu Esther', 'F', '2011-04-12', 'Mr. Moses Kiggundu', '0772100220'],
+    [`${schoolName} — Student Directory Import Template (Leave Admission No blank to auto-generate)`],
+    ['Admission No (Optional)', 'Full Name', 'Gender (M/F)', 'Date of Birth (YYYY-MM-DD)', 'Parent/Guardian Name', 'Parent Contact (+256/07...)'],
+    ['', 'Kiggundu Esther', 'F', '2011-04-12', 'Mr. Moses Kiggundu', '0772100220'],
   ];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
-  ws['!cols'] = [{ wch: 16 }, { wch: 24 }, { wch: 12 }, { wch: 22 }, { wch: 24 }, { wch: 24 }];
+  ws['!cols'] = [{ wch: 24 }, { wch: 24 }, { wch: 12 }, { wch: 22 }, { wch: 24 }, { wch: 24 }];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Students');
   XLSX.writeFile(wb, 'SchuleFlow_Student_Import_Template.xlsx');

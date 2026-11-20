@@ -124,20 +124,20 @@ function CrestMark({
       <img
         src={layout.customLogoDataUrl}
         alt="School crest"
-        className="h-12 w-12 object-contain rounded shrink-0 bg-white p-0.5"
+        className="h-12 w-12 print:h-9 print:w-9 object-contain rounded shrink-0 bg-white p-0.5"
       />
     );
   }
 
   const iconProps = {
-    className: 'h-6 w-6',
+    className: 'h-6 w-6 print:h-4 print:w-4',
     style: { color: inverted ? '#ffffff' : accentHex },
     'aria-hidden': true as const,
   };
 
   return (
     <div
-      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-md border ${
+      className={`flex h-11 w-11 print:h-9 print:w-9 shrink-0 items-center justify-center rounded-md border ${
         inverted ? 'border-white/25 bg-white/10' : 'border-slate-200 bg-slate-50'
       }`}
     >
@@ -179,12 +179,12 @@ function StudentVsClassMiniChart({
   if (rows.length === 0) return null;
 
   return (
-    <section className="mt-4 rounded-md border border-slate-200 p-3.5 bg-white">
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
-        <span className="text-xs font-semibold text-slate-800">
+    <section className="mt-4 print:mt-2 rounded-md border border-slate-200 p-3.5 print:p-2 bg-white">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5 print:mb-1.5">
+        <span className="text-xs print:text-[10.5px] font-semibold text-slate-800">
           Subject Performance vs. Class Mean (%)
         </span>
-        <div className="flex items-center gap-3 text-[11px] text-slate-600">
+        <div className="flex items-center gap-3 text-[11px] print:text-[9.5px] text-slate-600">
           <span className="inline-flex items-center gap-1">
             <span
               className="h-2 w-2.5 rounded-xs inline-block"
@@ -198,23 +198,23 @@ function StudentVsClassMiniChart({
           </span>
         </div>
       </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 print:grid-cols-3 gap-x-6 gap-y-2 print:gap-x-3 print:gap-y-1">
         {rows.map((r) => (
-          <div key={r.id} className="space-y-1 text-[11px]">
+          <div key={r.id} className="space-y-1 print:space-y-0.5 text-[11px] print:text-[9.5px]">
             <div className="flex items-center justify-between">
               <span className="font-medium text-slate-700 truncate pr-2">{r.name}</span>
               <span className="font-mono tabular-nums text-slate-700 shrink-0">
                 {r.hasValue ? `${r.studentPct.toFixed(0)}%` : '—'} vs {r.classPct.toFixed(0)}%
               </span>
             </div>
-            <div className="relative h-2.5 w-full rounded-xs bg-slate-100 overflow-hidden">
+            <div className="relative h-2.5 print:h-1.5 w-full rounded-xs bg-slate-100 overflow-hidden">
               <div
                 className="absolute inset-y-0 left-0 bg-slate-300/80"
                 style={{ width: `${Math.min(100, Math.max(0, r.classPct))}%` }}
               />
               {r.hasValue && (
                 <div
-                  className="absolute top-0.5 bottom-0.5 left-0 rounded-r-xs"
+                  className="absolute top-0.5 bottom-0.5 print:top-0 print:bottom-0 left-0 rounded-r-xs"
                   style={{
                     width: `${Math.min(100, Math.max(0, r.studentPct))}%`,
                     backgroundColor: accentHex,
@@ -280,7 +280,7 @@ function ReportCardSheet({
   const isCompact = layout.style === 'compact';
   const isCentered = layout.headerAlignment === 'centered';
 
-  const cellPad = isCompact ? 'py-1.5 px-2' : 'py-2 px-2';
+  const cellPad = isCompact ? 'py-1.5 px-2 print:py-1 print:px-1.5' : 'py-2 px-2 print:py-1 print:px-1.5';
   const sheetPad = isCompact ? 'p-5 sm:p-6' : 'p-6 sm:p-8';
 
   const principalSubjects = examClass.subjects.filter((s) => s.category !== 'subsidiary');
@@ -298,79 +298,79 @@ function ReportCardSheet({
 
   return (
     <article
-      className={`mx-auto max-w-4xl rounded-lg border border-slate-300 bg-white ${sheetPad} text-slate-900 print:border-slate-400 print:rounded-none print:max-w-none print:p-5`}
+      className={`report-card-sheet mx-auto max-w-4xl rounded-lg border border-slate-300 bg-white ${sheetPad} text-slate-900 print:border-slate-400 print:rounded-none print:max-w-none print:p-3`}
     >
       {/* Institutional Letterhead */}
       {isModern ? (
         <header
-          className={`rounded-md ${accent.headerBg} px-5 py-4 ${
-            isCentered ? 'text-center' : 'flex flex-wrap items-center justify-between gap-4'
+          className={`rounded-md ${accent.headerBg} px-5 py-4 print:px-3.5 print:py-2 ${
+            isCentered ? 'text-center' : 'flex flex-wrap print:flex-nowrap items-center justify-between gap-4 print:gap-3'
           }`}
         >
           <div
-            className={`flex items-center gap-3.5 ${
+            className={`flex items-center gap-3.5 print:gap-2.5 ${
               isCentered ? 'justify-center flex-col' : ''
             }`}
           >
             <CrestMark layout={layout} accentHex={accent.hex} inverted />
             <div>
-              <h2 className="font-display text-xl font-bold tracking-tight text-white">
+              <h2 className="font-display text-xl print:text-base font-bold tracking-tight text-white leading-tight">
                 {settings.schoolName}
               </h2>
               {layout.schoolMotto && (
-                <p className="text-xs text-white/80 italic">{layout.schoolMotto}</p>
+                <p className="text-xs print:text-[10.5px] text-white/80 italic">{layout.schoolMotto}</p>
               )}
               {layout.schoolContact && (
-                <p className="text-[11px] text-white/75 mt-0.5">{layout.schoolContact}</p>
+                <p className="text-[11px] print:text-[9.5px] text-white/75 mt-0.5 print:mt-0">{layout.schoolContact}</p>
               )}
             </div>
           </div>
-          <div className={isCentered ? 'mt-2 pt-2 border-t border-white/20' : 'text-right'}>
-            <p className="font-display text-sm font-semibold text-white">
+          <div className={isCentered ? 'mt-2 pt-2 print:mt-1 print:pt-1 border-t border-white/20' : 'text-right shrink-0'}>
+            <p className="font-display text-sm print:text-xs font-semibold text-white">
               {layout.reportTitle || 'Official Terminal Academic Report'}
             </p>
-            <p className="text-xs text-white/85 mt-0.5">
+            <p className="text-xs print:text-[10.5px] text-white/85 mt-0.5 print:mt-0">
               {isOlevel ? "O'Level Competency-Based Report" : "A'Level UACE Academic Report"} ·{' '}
               {settings.academicYear}
             </p>
-            <p className="text-[11px] text-white/75">{examClass.examTitle}</p>
+            <p className="text-[11px] print:text-[9.5px] text-white/75">{examClass.examTitle}</p>
           </div>
         </header>
       ) : (
         <header
-          className={`border-b-2 ${accent.border} pb-4 ${
-            isCentered ? 'text-center space-y-2' : 'flex flex-wrap items-start justify-between gap-4'
+          className={`border-b-2 ${accent.border} pb-4 print:pb-2 ${
+            isCentered ? 'text-center space-y-2 print:space-y-1' : 'flex flex-wrap print:flex-nowrap items-start justify-between gap-4 print:gap-3'
           }`}
         >
           <div
-            className={`flex items-center gap-3.5 ${
+            className={`flex items-center gap-3.5 print:gap-2.5 ${
               isCentered ? 'justify-center flex-col' : ''
             }`}
           >
             <CrestMark layout={layout} accentHex={accent.hex} />
             <div>
-              <h2 className="font-display text-xl font-bold tracking-tight text-slate-900">
+              <h2 className="font-display text-xl print:text-base font-bold tracking-tight text-slate-900 leading-tight">
                 {settings.schoolName}
               </h2>
               {layout.schoolMotto && (
-                <p className="text-xs text-slate-600 italic">{layout.schoolMotto}</p>
+                <p className="text-xs print:text-[10.5px] text-slate-600 italic">{layout.schoolMotto}</p>
               )}
-              <p className="text-xs text-slate-600 mt-0.5">{examClass.examTitle}</p>
+              <p className="text-xs print:text-[10.5px] text-slate-600 mt-0.5 print:mt-0">{examClass.examTitle}</p>
               {layout.schoolContact && (
-                <p className="text-[11px] text-slate-500 mt-0.5">{layout.schoolContact}</p>
+                <p className="text-[11px] print:text-[9.5px] text-slate-500 mt-0.5 print:mt-0">{layout.schoolContact}</p>
               )}
             </div>
           </div>
-          <div className={isCentered ? 'pt-1' : 'text-right'}>
-            <p className={`font-display text-sm font-semibold ${accent.text}`}>
+          <div className={isCentered ? 'pt-1 print:pt-0.5' : 'text-right shrink-0'}>
+            <p className={`font-display text-sm print:text-xs font-semibold ${accent.text}`}>
               {layout.reportTitle || 'Official Terminal Academic Report'}
             </p>
-            <p className="text-xs text-slate-600 mt-0.5">
+            <p className="text-xs print:text-[10.5px] text-slate-600 mt-0.5 print:mt-0">
               {isOlevel
                 ? "Lower Secondary · O'Level CBC"
                 : "Upper Secondary · A'Level Principal & Subsidiary"}
             </p>
-            <p className="text-[11px] text-slate-500 font-mono">
+            <p className="text-[11px] print:text-[9.5px] text-slate-500 font-mono">
               Exam Date: {examClass.examDate}
             </p>
           </div>
@@ -379,46 +379,46 @@ function ReportCardSheet({
 
       {/* Student Metadata + Optional Passport Photo */}
       <section
-        className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+        className={`flex flex-col sm:flex-row print:flex-row sm:items-center print:items-center justify-between gap-4 print:gap-3 ${
           isCompact ? 'py-3' : 'py-4'
-        } border-b border-slate-200 text-xs`}
+        } print:py-2 border-b border-slate-200 text-xs print:text-[10.5px]`}
       >
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 flex-1">
+        <div className="grid grid-cols-2 sm:grid-cols-4 print:grid-cols-4 gap-4 print:gap-2.5 flex-1">
           <div>
             <span className="block text-slate-500">Student Name</span>
-            <span className="mt-0.5 block text-sm font-semibold text-slate-900">
+            <span className="mt-0.5 block text-sm print:text-xs font-semibold text-slate-900 leading-snug">
               {studentResult.name}
             </span>
-            <span className="block text-[11px] text-slate-500">Gender: {studentResult.gender}</span>
+            <span className="block text-[11px] print:text-[9.5px] text-slate-500">Gender: {studentResult.gender}</span>
           </div>
           <div>
             <span className="block text-slate-500">Admission No.</span>
-            <span className="mt-0.5 block font-mono text-sm font-semibold tabular-nums text-slate-900">
+            <span className="mt-0.5 block font-mono text-sm print:text-xs font-semibold tabular-nums text-slate-900">
               {studentResult.admissionNo}
             </span>
             {!isOlevel && studentResult.combinationCode && (
-              <span className="block font-mono text-[11px] font-semibold text-blue-900">
+              <span className="block font-mono text-[11px] print:text-[9.5px] font-semibold text-blue-900">
                 Comb: {studentResult.combinationCode}
               </span>
             )}
           </div>
           <div>
             <span className="block text-slate-500">Class &amp; Teacher</span>
-            <span className="mt-0.5 block text-sm font-medium text-slate-900">
+            <span className="mt-0.5 block text-sm print:text-xs font-medium text-slate-900">
               {examClass.className}
             </span>
-            <span className="block text-[11px] text-slate-500">{examClass.classTeacher}</span>
+            <span className="block text-[11px] print:text-[9.5px] text-slate-500">{examClass.classTeacher}</span>
           </div>
           <div>
             <span className="block text-slate-500">
               {layout.showClassPosition ? 'Class Position' : 'Academic Standing'}
             </span>
             {layout.showClassPosition ? (
-              <span className="mt-0.5 block font-mono text-sm font-semibold tabular-nums text-slate-900">
+              <span className="mt-0.5 block font-mono text-sm print:text-xs font-semibold tabular-nums text-slate-900">
                 #{studentResult.rank} of {summary.studentResults.length}
               </span>
             ) : (
-              <span className="mt-0.5 block text-sm font-semibold text-slate-900">
+              <span className="mt-0.5 block text-sm print:text-xs font-semibold text-slate-900">
                 {studentResult.status}
               </span>
             )}
@@ -427,8 +427,8 @@ function ReportCardSheet({
 
         {/* Passport Photo Frame */}
         {layout.showStudentPhoto && (
-          <div className="shrink-0 flex sm:flex-col items-center gap-2">
-            <div className="relative h-24 w-20 rounded border border-slate-300 bg-slate-50 overflow-hidden flex items-center justify-center">
+          <div className="shrink-0 flex sm:flex-col print:flex-col items-center gap-2 print:gap-0">
+            <div className="relative h-24 w-20 print:h-[66px] print:w-[54px] rounded border border-slate-300 bg-slate-50 overflow-hidden flex items-center justify-center">
               {studentResult.photoDataUrl ? (
                 <img
                   src={studentResult.photoDataUrl}
@@ -437,8 +437,8 @@ function ReportCardSheet({
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center text-slate-400 px-1 text-center">
-                  <User className="h-7 w-7 stroke-[1.5]" aria-hidden="true" />
-                  <span className="text-[9px] font-medium mt-1 leading-tight">Passport Photo</span>
+                  <User className="h-7 w-7 print:h-5 print:w-5 stroke-[1.5]" aria-hidden="true" />
+                  <span className="text-[9px] print:text-[8px] font-medium mt-1 leading-tight">Passport Photo</span>
                 </div>
               )}
             </div>
@@ -482,9 +482,9 @@ function ReportCardSheet({
       </section>
 
       {/* Subject Marks Table: Distinct O'Level CBC vs A'Level Principal+Subsidiary */}
-      <section className={isCompact ? 'mt-3.5 overflow-x-auto' : 'mt-5 overflow-x-auto'}>
+      <section className={isCompact ? 'mt-3.5 print:mt-2 overflow-x-auto print:overflow-visible' : 'mt-5 print:mt-2 overflow-x-auto print:overflow-visible'}>
         {isOlevel ? (
-          <table className="w-full border-collapse text-left text-xs">
+          <table className="w-full border-collapse text-left text-xs print:text-[10px] print:leading-tight">
             <thead>
               <tr className={`border-y border-slate-300 ${accent.tableHead} font-semibold`}>
                 <th className={cellPad}>Subject</th>
@@ -620,13 +620,13 @@ function ReportCardSheet({
             </tfoot>
           </table>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-4 print:space-y-2">
             {/* A'Level Principal Subjects Table */}
             <div>
-              <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+              <p className="text-[11px] print:text-[9.5px] font-bold uppercase tracking-wider text-slate-500 mb-1.5 print:mb-1">
                 Principal Subjects {studentResult.combinationCode ? `(${studentResult.combinationCode})` : ''}
               </p>
-              <table className="w-full border-collapse text-left text-xs">
+              <table className="w-full border-collapse text-left text-xs print:text-[10px] print:leading-tight">
                 <thead>
                   <tr className={`border-y border-slate-300 ${accent.tableHead} font-semibold`}>
                     <th className={cellPad}>Principal Subject</th>
@@ -699,10 +699,10 @@ function ReportCardSheet({
             {/* A'Level Subsidiary Subjects Table */}
             {subsidiarySubjects.length > 0 && (
               <div>
-                <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+                <p className="text-[11px] print:text-[9.5px] font-bold uppercase tracking-wider text-slate-500 mb-1.5 print:mb-1">
                   Subsidiary Subjects (Pass Mark: {aPolicy.subsidiaryPassMark}%)
                 </p>
-                <table className="w-full border-collapse text-left text-xs">
+                <table className="w-full border-collapse text-left text-xs print:text-[10px] print:leading-tight">
                   <thead>
                     <tr className={`border-y border-slate-300 ${accent.tableHead} font-semibold`}>
                       <th className={cellPad}>Subsidiary Paper</th>
@@ -781,15 +781,15 @@ function ReportCardSheet({
         <section
           className={`${
             isCompact ? 'mt-3.5 p-3' : 'mt-5 p-3.5'
-          } grid grid-cols-2 sm:grid-cols-4 gap-3 border border-slate-200 rounded-md ${
+          } print:mt-2 print:p-2 grid grid-cols-2 sm:grid-cols-4 print:grid-cols-4 gap-3 print:gap-2 border border-slate-200 rounded-md ${
             accent.softBg
-          } text-xs`}
+          } text-xs print:text-[10px]`}
         >
           <div>
             <span className="text-slate-600">
               {isOlevel ? 'Overall CBC Grade' : 'Total UACE Points'}
             </span>
-            <p className="mt-0.5 font-display text-base font-bold text-slate-900">
+            <p className="mt-0.5 font-display text-base print:text-xs font-bold text-slate-900">
               {isOlevel
                 ? `${studentResult.grade} · ${studentResult.gradeLabel}`
                 : `${studentResult.totalPoints} / ${aPolicy.maxPrincipalsCount * 6 + (aPolicy.includeSubsidiaryPoints ? aPolicy.maxSubsidiariesCount : 0)} pts`}
@@ -799,7 +799,7 @@ function ReportCardSheet({
             <span className="text-slate-600">
               {isOlevel ? 'Term Average (%)' : 'Principal Passes'}
             </span>
-            <p className="mt-0.5 font-mono text-base font-bold tabular-nums text-slate-900">
+            <p className="mt-0.5 font-mono text-base print:text-xs font-bold tabular-nums text-slate-900">
               {isOlevel
                 ? `${studentResult.percentage.toFixed(1)}%`
                 : `${studentResult.principalPassesCount}P + ${studentResult.subsidiaryPassesCount}S`}
@@ -807,7 +807,7 @@ function ReportCardSheet({
           </div>
           <div>
             <span className="text-slate-600">Subjects Passed</span>
-            <p className="mt-0.5 font-mono text-base font-bold tabular-nums text-slate-900">
+            <p className="mt-0.5 font-mono text-base print:text-xs font-bold tabular-nums text-slate-900">
               {Math.max(0, studentResult.assessedCount - studentResult.failedSubjects.length)} /{' '}
               {studentResult.subjectCount}
             </p>
@@ -817,12 +817,12 @@ function ReportCardSheet({
             <div className="mt-0.5 flex items-center gap-1.5 font-semibold">
               {studentResult.status === 'Passed' ? (
                 <>
-                  <CheckCircle2 className="h-4 w-4 text-emerald-700 shrink-0" />
+                  <CheckCircle2 className="h-4 w-4 print:h-3.5 print:w-3.5 text-emerald-700 shrink-0" />
                   <span className="text-emerald-800">Passed</span>
                 </>
               ) : (
                 <>
-                  <TrendingUp className="h-4 w-4 text-blue-800 shrink-0" />
+                  <TrendingUp className="h-4 w-4 print:h-3.5 print:w-3.5 text-blue-800 shrink-0" />
                   <span className="text-slate-900">{studentResult.status}</span>
                 </>
               )}
@@ -842,9 +842,9 @@ function ReportCardSheet({
             .filter((o) => Boolean(o.obs));
           if (obsList.length === 0) return null;
           return (
-            <section className="mt-4 rounded-md border border-slate-200 p-3 text-[11px] bg-slate-50/50 space-y-1">
+            <section className="mt-4 print:mt-2 rounded-md border border-slate-200 p-3 print:p-2 text-[11px] print:text-[9.5px] print:leading-tight bg-slate-50/50 space-y-1 print:space-y-0.5">
               <p className="font-semibold text-slate-800">CBC Competency Observations</p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-slate-700">
+              <div className="grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-x-4 gap-y-1 print:gap-x-3 print:gap-y-0.5 text-slate-700">
                 {obsList.map((o) => (
                   <p key={o.name}>
                     <strong className="text-slate-900">{o.name}:</strong> {o.obs}
@@ -867,10 +867,10 @@ function ReportCardSheet({
       )}
 
       {/* Remarks Section: Class Teacher + DOS + Headteacher */}
-      <section className={`${isCompact ? 'mt-3.5' : 'mt-5'} grid grid-cols-1 sm:grid-cols-2 gap-4`}>
+      <section className={`${isCompact ? 'mt-3.5' : 'mt-5'} print:mt-2 grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-4 print:gap-2.5`}>
         <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-xs font-semibold text-slate-700">
+          <div className="flex items-center justify-between mb-1 print:mb-0.5">
+            <label className="text-xs print:text-[10px] font-semibold text-slate-700">
               Class Teacher’s Remark
             </label>
             {editable && hasCustomTeacherRemark && onUpdateRemark && (
@@ -892,20 +892,20 @@ function ReportCardSheet({
                 onChange={(e) => onUpdateRemark('classTeacherRemark', e.target.value)}
                 className="no-print w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 focus:border-blue-700 focus:outline-none"
               />
-              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-800">
+              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-2 py-1 text-[10px] leading-snug text-slate-800">
                 {studentResult.teacherRemark}
               </p>
             </>
           ) : (
-            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-800">
+            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-2 print:px-2 print:py-1 text-xs print:text-[10px] print:leading-snug text-slate-800">
               {studentResult.teacherRemark}
             </p>
           )}
         </div>
 
         <div>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-xs font-semibold text-slate-700">
+          <div className="flex items-center justify-between mb-1 print:mb-0.5">
+            <label className="text-xs print:text-[10px] font-semibold text-slate-700">
               Headteacher’s Remark
             </label>
             {editable && hasCustomHeadRemark && onUpdateRemark && (
@@ -927,12 +927,12 @@ function ReportCardSheet({
                 onChange={(e) => onUpdateRemark('headTeacherRemark', e.target.value)}
                 className="no-print w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 focus:border-blue-700 focus:outline-none"
               />
-              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-800">
+              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-2 py-1 text-[10px] leading-snug text-slate-800">
                 {studentResult.headTeacherRemark}
               </p>
             </>
           ) : (
-            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-2 text-xs text-slate-800">
+            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-2 print:px-2 print:py-1 text-xs print:text-[10px] print:leading-snug text-slate-800">
               {studentResult.headTeacherRemark}
             </p>
           )}
@@ -940,9 +940,9 @@ function ReportCardSheet({
       </section>
 
       {layout.showDosComment && (
-        <section className="mt-3">
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-xs font-semibold text-slate-700">
+        <section className="mt-3 print:mt-1.5">
+          <div className="flex items-center justify-between mb-1 print:mb-0.5">
+            <label className="text-xs print:text-[10px] font-semibold text-slate-700">
               Director of Studies (DOS) Comment
             </label>
             {editable && hasCustomDosRemark && onUpdateRemark && (
@@ -964,12 +964,12 @@ function ReportCardSheet({
                 onChange={(e) => onUpdateRemark('dosRemark', e.target.value)}
                 className="no-print w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 focus:border-blue-700 focus:outline-none"
               />
-              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-3 py-1.5 text-xs text-slate-800">
+              <p className="hidden print:block rounded border border-slate-200 bg-slate-50/50 px-2 py-1 text-[10px] leading-snug text-slate-800">
                 {studentResult.dosRemark}
               </p>
             </>
           ) : (
-            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-1.5 text-xs text-slate-800">
+            <p className="rounded border border-slate-200 bg-slate-50/50 px-3 py-1.5 print:px-2 print:py-1 text-xs print:text-[10px] print:leading-snug text-slate-800">
               {studentResult.dosRemark}
             </p>
           )}
@@ -978,7 +978,7 @@ function ReportCardSheet({
 
       {/* Term Closing & Next Term Opening Notice */}
       {layout.showNextTermDate && (layout.nextTermDate || layout.nextTermClosingDate) && (
-        <section className="mt-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 flex flex-wrap items-center justify-between gap-2">
+        <section className="mt-3 print:mt-1.5 rounded border border-slate-200 bg-slate-50 px-3 py-2 print:px-2.5 print:py-1 text-xs print:text-[10px] text-slate-700 flex flex-wrap items-center justify-between gap-2">
           {layout.nextTermClosingDate && (
             <span>
               Term Closed On:{' '}
@@ -996,12 +996,12 @@ function ReportCardSheet({
 
       {/* Grading Key */}
       {layout.showGradingKey && (
-        <section className="mt-4 pt-3 border-t border-slate-200 space-y-1.5 text-[11px] text-slate-500">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+        <section className="mt-4 pt-3 print:mt-2 print:pt-1.5 border-t border-slate-200 space-y-1.5 print:space-y-0.5 text-[11px] print:text-[9.5px] text-slate-500">
+          <div className="flex flex-wrap items-center justify-between gap-2 print:gap-1">
             <span className="font-medium text-slate-600">
               {isOlevel ? "O'Level CBC Grading Key:" : "A'Level Principal Grading Key:"}
             </span>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono tabular-nums">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 print:gap-x-2 print:gap-y-0 font-mono tabular-nums">
               {[...activeScale]
                 .sort((a, b) => b.minPercentage - a.minPercentage)
                 .map((band) => (
@@ -1013,7 +1013,7 @@ function ReportCardSheet({
             </div>
           </div>
           {isOlevel && (
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] print:text-[9.5px] text-slate-500">
               <span className="font-medium text-slate-600">CBC Identifiers (ID):</span>
               <span>
                 1 = Basic (&lt;50%) · 2 = Moderate (50–79%) · 3 = Outstanding (80%+) | AoI (
@@ -1026,32 +1026,32 @@ function ReportCardSheet({
 
       {/* Signatures & Optional Official Stamp */}
       <footer
-        className={`${isCompact ? 'mt-5 pt-3' : 'mt-8 pt-4'} grid gap-6 text-xs ${
+        className={`${isCompact ? 'mt-5 pt-3' : 'mt-8 pt-4'} print:mt-3 print:pt-2 grid gap-6 print:gap-4 text-xs print:text-[10px] ${
           layout.showParentSignature || layout.showSchoolStampBox
-            ? 'grid-cols-1 sm:grid-cols-3'
-            : 'grid-cols-2'
+            ? 'grid-cols-1 sm:grid-cols-3 print:grid-cols-3'
+            : 'grid-cols-2 print:grid-cols-2'
         }`}
       >
         <div>
-          <div className="h-8 border-b border-slate-400" />
-          <p className="mt-1.5 font-medium text-slate-800">{examClass.classTeacher}</p>
-          <p className="text-[11px] text-slate-500">{layout.leftSignatureLabel}</p>
+          <div className="h-8 print:h-5 border-b border-slate-400" />
+          <p className="mt-1.5 print:mt-1 font-medium text-slate-800">{examClass.classTeacher}</p>
+          <p className="text-[11px] print:text-[9.5px] text-slate-500">{layout.leftSignatureLabel}</p>
         </div>
         <div>
-          <div className="h-8 border-b border-slate-400" />
-          <p className="mt-1.5 font-medium text-slate-800">{settings.principalName}</p>
-          <p className="text-[11px] text-slate-500">{layout.rightSignatureLabel}</p>
+          <div className="h-8 print:h-5 border-b border-slate-400" />
+          <p className="mt-1.5 print:mt-1 font-medium text-slate-800">{settings.principalName}</p>
+          <p className="text-[11px] print:text-[9.5px] text-slate-500">{layout.rightSignatureLabel}</p>
         </div>
         {layout.showParentSignature && (
           <div>
-            <div className="h-8 border-b border-slate-400" />
-            <p className="mt-1.5 font-medium text-slate-800">Parent / Guardian</p>
-            <p className="text-[11px] text-slate-500">{layout.parentSignatureLabel}</p>
+            <div className="h-8 print:h-5 border-b border-slate-400" />
+            <p className="mt-1.5 print:mt-1 font-medium text-slate-800">Parent / Guardian</p>
+            <p className="text-[11px] print:text-[9.5px] text-slate-500">{layout.parentSignatureLabel}</p>
           </div>
         )}
         {layout.showSchoolStampBox && !layout.showParentSignature && (
           <div className="flex items-center justify-center">
-            <div className="h-14 w-36 rounded border border-dashed border-slate-400 flex items-center justify-center text-[11px] text-slate-400">
+            <div className="h-14 w-36 print:h-10 print:w-32 rounded border border-dashed border-slate-400 flex items-center justify-center text-[11px] print:text-[9.5px] text-slate-400">
               Official School Stamp
             </div>
           </div>
@@ -1059,15 +1059,15 @@ function ReportCardSheet({
       </footer>
 
       {layout.showSchoolStampBox && layout.showParentSignature && (
-        <div className="mt-4 flex justify-end">
-          <div className="h-12 w-40 rounded border border-dashed border-slate-400 flex items-center justify-center text-[11px] text-slate-400">
+        <div className="mt-4 print:mt-1.5 flex justify-end">
+          <div className="h-12 w-40 print:h-9 print:w-32 rounded border border-dashed border-slate-400 flex items-center justify-center text-[11px] print:text-[9.5px] text-slate-400">
             Official School Stamp
           </div>
         </div>
       )}
 
       {layout.footerNote && (
-        <p className="mt-4 pt-2 border-t border-slate-100 text-center text-[11px] text-slate-400">
+        <p className="mt-4 pt-2 print:mt-1.5 print:pt-1 border-t border-slate-100 text-center text-[11px] print:text-[9.5px] text-slate-400">
           {layout.footerNote}
         </p>
       )}
@@ -1243,7 +1243,7 @@ export function ReportCardsView({
           </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        <div className="grid grid-cols-1 xl:grid-cols-12 print:block gap-6 print:gap-0 items-start">
           <div className="xl:col-span-4 rounded-lg border border-slate-200 bg-white p-4 no-print">
             <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-md border border-slate-200 mb-3">
               <button

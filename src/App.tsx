@@ -97,7 +97,6 @@ export default function App() {
     recentAccounts,
     removeRecentAccount,
     signInWithCredentials,
-    signUpWithEmail,
     signOutWorkspace,
     refreshPlatformData,
     refreshTenantWorkspace,
@@ -126,8 +125,12 @@ export default function App() {
     if (!authProfile) return null;
     const normalizedRole = normalizeUserRole(authProfile.schoolRole);
     const cleanEmail = authProfile.email.trim().toLowerCase();
+    const cleanStaffId = authProfile.staffId?.trim().toUpperCase() ?? '';
     const uid = authProfile.uid;
     const matchedStaff = db?.users.find((u) => {
+      if (cleanStaffId && u.staffId && u.staffId.trim().toUpperCase() === cleanStaffId) {
+        return true;
+      }
       if (cleanEmail && u.email.trim().toLowerCase() === cleanEmail) {
         return true;
       }
@@ -145,11 +148,13 @@ export default function App() {
     if (matchedStaff && authProfile.globalRole !== 'super_admin') {
       return {
         ...matchedStaff,
+        staffId: matchedStaff.staffId ?? authProfile.staffId,
         role: normalizeUserRole(matchedStaff.role),
       };
     }
     return {
       id: matchedStaff?.id ?? authProfile.uid,
+      staffId: matchedStaff?.staffId ?? authProfile.staffId,
       name: authProfile.name,
       email: authProfile.email,
       username: authProfile.username || authProfile.email.split('@')[0] || 'user',
@@ -272,7 +277,6 @@ export default function App() {
         recentAccounts={recentAccounts}
         onRemoveRecentAccount={removeRecentAccount}
         onCredentialSignIn={signInWithCredentials}
-        onSignUp={signUpWithEmail}
       />
     );
   }
@@ -630,6 +634,7 @@ export default function App() {
         activeTab={effectiveTab}
         onSelectTab={safeNavigate}
         settings={db.settings}
+        schoolCode={activeSchool?.schoolCode ?? authProfile.schoolCode ?? undefined}
         pendingApprovalCount={pendingApprovalCount}
         returnedCount={returnedForTeacherCount}
         mobileOpen={mobileSidebarOpen}
@@ -651,6 +656,14 @@ export default function App() {
             </button>
             <div className="min-w-0">
               <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                {(activeSchool?.schoolCode || authProfile.schoolCode) && (
+                  <span className="font-mono font-semibold text-blue-900">
+                    {activeSchool?.schoolCode ?? authProfile.schoolCode}
+                  </span>
+                )}
+                {(activeSchool?.schoolCode || authProfile.schoolCode) && (
+                  <span aria-hidden="true">·</span>
+                )}
                 <span className="truncate font-medium text-slate-600">{db.settings.schoolName}</span>
                 <span aria-hidden="true">/</span>
                 <span className="text-slate-900 font-medium whitespace-nowrap">
@@ -747,7 +760,10 @@ export default function App() {
           )}
 
         {/* Main Viewport (Keyed strictly by activeSchoolId for complete UI state isolation) */}
-        <main key={activeSchoolId ?? 'default'} className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-4">
+        <main
+          key={activeSchoolId ?? 'default'}
+          className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-4 print:p-0 print:max-w-none print:space-y-0"
+        >
           {errorBanner && (
             <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 flex items-center gap-2 no-print">
               <AlertCircle className="h-4 w-4 shrink-0" />
@@ -790,31 +806,39 @@ export default function App() {
               curriculumScope={effectiveCurriculumScope}
               onAddStudent={(stu: StudentProfile) => {
                 void runPersist(async () => {
-                  await tenantApi.addStudents([stu]);
+                  const res = await tenantApi.addStudents([stu]);
+                  const savedStudents = res.students.length > 0 ? res.students : [stu];
                   updateLocalTenantDb((prev) => ({
                     ...prev,
-                    students: [...prev.students, stu],
+                    students: [...prev.students, ...savedStudents],
                   }));
-                  setNotice(`Registered student ${stu.fullName} (${stu.admissionNo}).`);
+                  const created = savedStudents[0];
+                  setNotice(
+                    `Registered student ${created.fullName} (${created.studentId || created.admissionNo}).`
+                  );
                 }, 'Failed to register student.');
               }}
               onBulkAddStudents={(list: StudentProfile[]) => {
                 void runPersist(async () => {
-                  await tenantApi.addStudents(list);
+                  const res = await tenantApi.addStudents(list);
+                  const savedStudents = res.students.length > 0 ? res.students : list;
                   updateLocalTenantDb((prev) => ({
                     ...prev,
-                    students: [...prev.students, ...list],
+                    students: [...prev.students, ...savedStudents],
                   }));
-                  setNotice(`Imported ${list.length} new student(s).`);
+                  setNotice(`Imported ${savedStudents.length} new student(s) with auto-generated IDs.`);
                 }, 'Failed to import students.');
               }}
               onUpdateStudent={(stu: StudentProfile) => {
-                updateLocalTenantDb((prev) => ({
-                  ...prev,
-                  students: prev.students.map((s) => (s.id === stu.id ? stu : s)),
-                }));
-                setNotice(`Updated record for ${stu.fullName}.`);
-                void runPersist(() => tenantApi.updateStudent(stu), 'Failed to update student.');
+                void runPersist(async () => {
+                  const res = await tenantApi.updateStudent(stu);
+                  const saved = res.student ?? stu;
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    students: prev.students.map((s) => (s.id === saved.id ? saved : s)),
+                  }));
+                  setNotice(`Updated record for ${saved.fullName}.`);
+                }, 'Failed to update student.');
               }}
               onBulkPromote={(ids, targetClassId) => {
                 updateLocalTenantDb((prev) => ({
@@ -1159,49 +1183,51 @@ export default function App() {
                   ...u,
                   id: u.id.includes(':') ? u.id : `${activeSchoolId}:${u.id}`,
                 };
-                updateLocalTenantDb((prev) => ({
-                  ...prev,
-                  users: [...prev.users, { ...scopedUser, password: '********' }],
-                }));
-                setNotice(`Created staff account for ${u.name}.`);
-                void runPersist(
-                  () => tenantApi.saveStaff(scopedUser),
-                  'Failed to create staff account.'
-                );
+                void runPersist(async () => {
+                  const res = await tenantApi.saveStaff(scopedUser);
+                  const saved = { ...res.staff, password: '********' };
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    users: [...prev.users, saved],
+                  }));
+                  setNotice(
+                    `Created staff account for ${saved.name}${saved.staffId ? ` (${saved.staffId})` : ''}.`
+                  );
+                }, 'Failed to create staff account.');
               }}
               onBulkAddUsers={(list) => {
                 const scopedList = list.map((u) => ({
                   ...u,
                   id: u.id.includes(':') ? u.id : `${activeSchoolId}:${u.id}`,
                 }));
-                updateLocalTenantDb((prev) => ({
-                  ...prev,
-                  users: [
-                    ...prev.users,
-                    ...scopedList.map((u) => ({ ...u, password: '********' })),
-                  ],
-                }));
-                setNotice(`Imported ${scopedList.length} staff account(s).`);
-                void runPersist(
-                  () => tenantApi.bulkSaveStaff(scopedList),
-                  'Failed to bulk-import staff accounts.'
-                );
+                void runPersist(async () => {
+                  const res = await tenantApi.bulkSaveStaff(scopedList);
+                  const savedList = (res.staff ?? scopedList).map((s) => ({
+                    ...s,
+                    password: '********',
+                  }));
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    users: [...prev.users, ...savedList],
+                  }));
+                  setNotice(`Imported ${savedList.length} staff account(s) with generated Staff IDs.`);
+                }, 'Failed to bulk-import staff accounts.');
               }}
               onUpdateUser={(u) => {
-                updateLocalTenantDb((prev) => ({
-                  ...prev,
-                  users: prev.users.map((item) =>
-                    item.id === u.id ? { ...u, password: '********' } : item
-                  ),
-                }));
-                setNotice(`Updated account for ${u.name}.`);
-                void runPersist(
-                  () => tenantApi.saveStaff(u),
-                  'Failed to update staff account.'
-                );
+                void runPersist(async () => {
+                  const res = await tenantApi.saveStaff(u);
+                  const saved = { ...res.staff, password: '********' };
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    users: prev.users.map((item) => (item.id === saved.id ? saved : item)),
+                  }));
+                  setNotice(
+                    `Updated account for ${saved.name}${saved.staffId ? ` (${saved.staffId})` : ''}.`
+                  );
+                }, 'Failed to update staff account.');
               }}
               onResetPassword={() => {
-                setNotice('Use Edit on the staff row to assign a new password.');
+                setNotice('Assign a new password in the edit form and click Save Account.');
               }}
             />
           )}

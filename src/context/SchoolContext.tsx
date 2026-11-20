@@ -8,8 +8,6 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { User as SupabaseUser } from '@supabase/supabase-js';
-import { getSupabaseClient, setRuntimeSupabaseConfig } from '../lib/supabase';
 import type {
   AuditLogRecord,
   AuthSessionProfile,
@@ -27,15 +25,21 @@ const RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts';
 
 export interface RememberedAccountHint {
   identifier: string;
+  staffId?: string;
   name: string;
   schoolId: string | null;
+  schoolCode: string | null;
   schoolName: string;
   roleLabel: string;
+  mode: 'school' | 'super_admin';
 }
 
-export interface SignUpResult {
-  requiresEmailConfirmation: boolean;
-  message: string;
+export interface CredentialSignInParams {
+  schoolCode?: string;
+  identifier: string;
+  password: string;
+  mode?: 'school' | 'super_admin';
+  rememberMe?: boolean;
 }
 
 function readStoredToken(): string | null {
@@ -79,6 +83,12 @@ function readRecentAccounts(): RememberedAccountHint[] {
           typeof item.schoolName === 'string' &&
           typeof item.roleLabel === 'string'
       )
+      .map((item): RememberedAccountHint => ({
+        ...item,
+        schoolCode: typeof item.schoolCode === 'string' ? item.schoolCode : null,
+        mode:
+          item.mode === 'super_admin' || item.schoolId === null ? 'super_admin' : 'school',
+      }))
       .slice(0, 5);
   } catch {
     return [];
@@ -102,20 +112,6 @@ function formatFriendlyAuthError(err: unknown): string {
         ? String((err as { message?: unknown }).message ?? '')
         : 'Sign-in failed. Please try again.';
 
-  const lower = raw.toLowerCase();
-  if (lower.includes('invalid login credentials') || lower.includes('invalid credentials')) {
-    return 'Invalid email, phone number, or password.';
-  }
-  if (lower.includes('email not confirmed')) {
-    return 'Please confirm your email address via the link sent to your inbox before signing in.';
-  }
-  if (lower.includes('user already registered')) {
-    return 'An account with this email already exists. Please sign in instead.';
-  }
-  if (lower.includes('password should be at least')) {
-    return 'Password must be at least 6 characters.';
-  }
-
   return raw.replace(/^(Forbidden|Unauthorized):\s*/i, '').trim() || 'Sign-in failed.';
 }
 
@@ -124,9 +120,13 @@ function findMatchingStaffInDb(
   profile: AuthSessionProfile,
   schoolId: string
 ): UserAccount | undefined {
+  const cleanStaffId = profile.staffId?.trim().toLowerCase() ?? '';
   const cleanEmail = profile.email.trim().toLowerCase();
   const uid = profile.uid;
   return staffList.find((u) => {
+    if (cleanStaffId && u.staffId && u.staffId.trim().toLowerCase() === cleanStaffId) {
+      return true;
+    }
     if (cleanEmail && u.email.trim().toLowerCase() === cleanEmail) {
       return true;
     }
@@ -144,7 +144,6 @@ function findMatchingStaffInDb(
 }
 
 interface SchoolContextValue {
-  supabaseUser: SupabaseUser | null;
   authProfile: AuthSessionProfile | null;
   authLoading: boolean;
   authError: string | null;
@@ -164,16 +163,7 @@ interface SchoolContextValue {
   workspaceError: string | null;
   recentAccounts: RememberedAccountHint[];
   removeRecentAccount: (identifier: string, schoolId: string | null) => void;
-  signInWithCredentials: (
-    identifier: string,
-    password: string,
-    options?: { schoolId?: string; rememberMe?: boolean }
-  ) => Promise<void>;
-  signUpWithEmail: (
-    email: string,
-    password: string,
-    fullName?: string
-  ) => Promise<SignUpResult>;
+  signInWithCredentials: (params: CredentialSignInParams) => Promise<void>;
   signOutWorkspace: () => Promise<void>;
   refreshPlatformData: () => Promise<void>;
   refreshTenantWorkspace: (schoolId?: string) => Promise<void>;
@@ -187,7 +177,6 @@ interface SchoolContextValue {
 const SchoolContext = createContext<SchoolContextValue | null>(null);
 
 export function SchoolProvider({ children }: { children: ReactNode }) {
-  const [supabaseUser, setSupabaseUser] = useState<SupabaseUser | null>(null);
   const [authProfile, setAuthProfile] = useState<AuthSessionProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -210,23 +199,13 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   const localTokenRef = useRef<string | null>(readStoredToken());
   const tenantCacheRef = useRef<Map<string, SchoolDatabase>>(new Map());
   const authProfileRef = useRef<AuthSessionProfile | null>(null);
-  const handlingManualSupabaseAuthRef = useRef(false);
-  const preserveAuthErrorOnSignOutRef = useRef(false);
 
   useEffect(() => {
     authProfileRef.current = authProfile;
   }, [authProfile]);
 
   const getValidToken = useCallback(async (): Promise<string | null> => {
-    if (localTokenRef.current) {
-      return localTokenRef.current;
-    }
-    const client = getSupabaseClient();
-    if (!client) {
-      return null;
-    }
-    const { data } = await client.auth.getSession();
-    return data.session?.access_token ?? null;
+    return localTokenRef.current;
   }, []);
 
   useEffect(() => {
@@ -369,25 +348,28 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         ? accessibleSchools.find((s) => s.id === user.schoolId)
         : undefined;
       const hintIdentifier = (
+        user.staffId ||
         preferredIdentifier?.trim() ||
         user.email ||
         user.username ||
         ''
       ).trim();
       if (!hintIdentifier) return;
-      const roleLabel =
-        user.globalRole === 'super_admin'
-          ? 'Platform Super Admin'
-          : ROLE_DISPLAY_NAMES[user.schoolRole] ?? 'Staff';
+      const isSuperAdmin = user.globalRole === 'super_admin';
+      const roleLabel = isSuperAdmin
+        ? 'Platform Super Admin'
+        : ROLE_DISPLAY_NAMES[user.schoolRole] ?? 'Staff';
       const entry: RememberedAccountHint = {
         identifier: hintIdentifier,
+        staffId: user.staffId,
         name: user.name,
-        schoolId: user.globalRole === 'super_admin' ? null : user.schoolId,
-        schoolName:
-          user.globalRole === 'super_admin'
-            ? 'Platform Administration'
-            : schoolMatch?.name ?? 'School Workspace',
+        schoolId: isSuperAdmin ? null : user.schoolId,
+        schoolCode: isSuperAdmin ? null : schoolMatch?.schoolCode ?? user.schoolCode ?? null,
+        schoolName: isSuperAdmin
+          ? 'Platform Administration'
+          : schoolMatch?.name ?? 'School Workspace',
         roleLabel,
+        mode: isSuperAdmin ? 'super_admin' : 'school',
       };
       setRecentAccounts((prev) => {
         const filtered = prev.filter(
@@ -460,134 +442,30 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     [getValidToken, loadPlatformData, loadTenantWorkspace, rememberSignedInHint]
   );
 
-  // Restore stored credential session or active Supabase Auth session on mount
+  // Restore stored PostgreSQL session on mount
   useEffect(() => {
     let active = true;
-    let unsubscribeAuthListener: (() => void) | null = null;
-
-    const attachSupabaseListener = () => {
-      const client = getSupabaseClient();
-      if (!client || unsubscribeAuthListener) return;
-      const { data: authListener } = client.auth.onAuthStateChange(async (_event, session) => {
-        if (!active) return;
-        setSupabaseUser(session?.user ?? null);
-
-        if (handlingManualSupabaseAuthRef.current) {
-          return;
-        }
-
-        if (!session?.user && localTokenRef.current) {
-          return;
-        }
-
-        if (!session?.user || !session.access_token) {
-          if (preserveAuthErrorOnSignOutRef.current) {
-            preserveAuthErrorOnSignOutRef.current = false;
-          } else {
-            setAuthError(null);
-          }
-          tenantCacheRef.current.clear();
-          setAuthProfile(null);
-          setSchools([]);
-          setAuditLogs([]);
-          setActiveSchoolId(null);
-          setDb(null);
-          setAuthLoading(false);
-          return;
-        }
-
-        setAuthError(null);
-        localTokenRef.current = null;
-        clearStoredToken();
-        setAuthLoading(true);
-        try {
-          configureApiClient(async () => session.access_token, null);
-          const synced = await platformApi.syncSession();
-          if (!active) return;
-          configureApiClient(getValidToken, null);
-          await applyAuthenticatedSession(synced.user, synced.schools);
-        } catch (err: unknown) {
-          if (!active) return;
-          setAuthError(formatFriendlyAuthError(err));
-          setAuthProfile(null);
-          setDb(null);
-          preserveAuthErrorOnSignOutRef.current = true;
-          await getSupabaseClient()?.auth.signOut().catch(() => undefined);
-        } finally {
-          if (active) setAuthLoading(false);
-        }
-      });
-      unsubscribeAuthListener = () => authListener.subscription.unsubscribe();
-    };
 
     const restoreSession = async () => {
-      let client = getSupabaseClient();
-      if (!client) {
-        try {
-          const cfg = await platformApi.getAuthConfig();
-          if (!active) return;
-          if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
-            client = setRuntimeSupabaseConfig(cfg.supabaseUrl, cfg.supabaseAnonKey);
-          }
-        } catch {
-          // Runtime Supabase config is optional; PostgreSQL credential & registration auth works without it
-        }
-      }
-
-      if (client) {
-        attachSupabaseListener();
-      }
-
       const storedToken = readStoredToken();
-      if (storedToken) {
-        localTokenRef.current = storedToken;
-        configureApiClient(getValidToken, null);
-        try {
-          const synced = await platformApi.syncSession();
-          if (!active) return;
-          await applyAuthenticatedSession(synced.user, synced.schools);
-          if (active) setAuthLoading(false);
-          return;
-        } catch (err: unknown) {
-          localTokenRef.current = null;
-          clearStoredToken();
-          if (active) {
-            setAuthProfile(null);
-            setAuthError(formatFriendlyAuthError(err));
-            setAuthLoading(false);
-          }
-          return;
-        }
-      }
-
-      if (!client) {
+      if (!storedToken) {
         if (active) setAuthLoading(false);
         return;
       }
 
-      const { data } = await client.auth.getSession();
-      if (!active) return;
-      const session = data.session;
-      setSupabaseUser(session?.user ?? null);
-
-      if (!session?.access_token) {
-        setAuthLoading(false);
-        return;
-      }
-
+      localTokenRef.current = storedToken;
+      configureApiClient(getValidToken, null);
       try {
-        configureApiClient(async () => session.access_token, null);
         const synced = await platformApi.syncSession();
         if (!active) return;
-        configureApiClient(getValidToken, null);
         await applyAuthenticatedSession(synced.user, synced.schools);
       } catch (err: unknown) {
-        if (!active) return;
-        setAuthError(formatFriendlyAuthError(err));
-        setAuthProfile(null);
-        setDb(null);
-        preserveAuthErrorOnSignOutRef.current = true;
-        await client.auth.signOut().catch(() => undefined);
+        localTokenRef.current = null;
+        clearStoredToken();
+        if (active) {
+          setAuthProfile(null);
+          setAuthError(formatFriendlyAuthError(err));
+        }
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -597,19 +475,16 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
 
     return () => {
       active = false;
-      unsubscribeAuthListener?.();
     };
   }, [applyAuthenticatedSession, getValidToken]);
 
   const signInWithCredentials = useCallback(
-    async (
-      identifier: string,
-      password: string,
-      options?: { schoolId?: string; rememberMe?: boolean }
-    ) => {
-      const trimmedIdentifier = identifier.trim();
-      const rememberMe = options?.rememberMe ?? true;
-      const selectedSchoolId = options?.schoolId?.trim() || undefined;
+    async (params: CredentialSignInParams) => {
+      const trimmedIdentifier = params.identifier.trim();
+      const trimmedSchoolCode = params.schoolCode?.trim().toUpperCase() || undefined;
+      const mode = params.mode ?? 'school';
+      const rememberMe = params.rememberMe ?? true;
+
       setAuthError(null);
       setAuthLoading(true);
       try {
@@ -617,63 +492,17 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         clearStoredToken();
         configureApiClient(async () => null, null);
 
-        const supabaseClient = getSupabaseClient();
-        try {
-          const res = await platformApi.loginWithCredentials(
-            trimmedIdentifier,
-            password,
-            selectedSchoolId
-          );
-          localTokenRef.current = res.token;
-          saveStoredToken(res.token, rememberMe);
-          if (supabaseClient) {
-            await supabaseClient.auth.signOut().catch(() => undefined);
-          }
-          configureApiClient(getValidToken, null);
-          await applyAuthenticatedSession(res.user, res.schools, trimmedIdentifier);
-          return;
-        } catch (backendErr: unknown) {
-          const isEmailCredentialMismatch =
-            backendErr instanceof ApiError &&
-            backendErr.status === 401 &&
-            trimmedIdentifier.includes('@') &&
-            Boolean(supabaseClient);
+        const res = await platformApi.loginWithCredentials({
+          schoolCode: mode === 'school' ? trimmedSchoolCode : undefined,
+          identifier: trimmedIdentifier,
+          password: params.password,
+          mode,
+        });
 
-          if (!isEmailCredentialMismatch) {
-            throw backendErr;
-          }
-        }
-
-        // Fallback to Supabase Auth signInWithPassword for Supabase-registered email accounts
-        if (!supabaseClient) {
-          throw new Error('Invalid email, phone number, or password.');
-        }
-
-        handlingManualSupabaseAuthRef.current = true;
-        try {
-          const { data, error } = await supabaseClient.auth.signInWithPassword({
-            email: trimmedIdentifier,
-            password,
-          });
-          if (error) {
-            throw error;
-          }
-          const accessToken = data.session?.access_token;
-          if (!accessToken) {
-            throw new Error('Supabase sign-in succeeded without an active access token.');
-          }
-          setSupabaseUser(data.user ?? null);
-          configureApiClient(async () => accessToken, null);
-          const synced = await platformApi.syncSession();
-          configureApiClient(getValidToken, null);
-          await applyAuthenticatedSession(synced.user, synced.schools, trimmedIdentifier);
-        } catch (supabaseErr: unknown) {
-          preserveAuthErrorOnSignOutRef.current = true;
-          await supabaseClient.auth.signOut().catch(() => undefined);
-          throw supabaseErr;
-        } finally {
-          handlingManualSupabaseAuthRef.current = false;
-        }
+        localTokenRef.current = res.token;
+        saveStoredToken(res.token, rememberMe);
+        configureApiClient(getValidToken, null);
+        await applyAuthenticatedSession(res.user, res.schools, trimmedIdentifier);
       } catch (err: unknown) {
         localTokenRef.current = null;
         clearStoredToken();
@@ -681,84 +510,6 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         setDb(null);
         setAuthError(formatFriendlyAuthError(err));
       } finally {
-        setAuthLoading(false);
-      }
-    },
-    [applyAuthenticatedSession, getValidToken]
-  );
-
-  const signUpWithEmail = useCallback(
-    async (email: string, password: string, fullName?: string): Promise<SignUpResult> => {
-      const cleanEmail = email.trim().toLowerCase();
-      setAuthError(null);
-      setAuthLoading(true);
-      handlingManualSupabaseAuthRef.current = true;
-
-      try {
-        localTokenRef.current = null;
-        clearStoredToken();
-
-        let supabaseClient = getSupabaseClient();
-        if (!supabaseClient) {
-          try {
-            const cfg = await platformApi.getAuthConfig();
-            if (cfg.supabaseUrl && cfg.supabaseAnonKey) {
-              supabaseClient = setRuntimeSupabaseConfig(cfg.supabaseUrl, cfg.supabaseAnonKey);
-            }
-          } catch {
-            // Fall back cleanly to built-in PostgreSQL registration endpoint
-          }
-        }
-
-        if (!supabaseClient) {
-          const res = await platformApi.registerEmail(cleanEmail, password, fullName);
-          localTokenRef.current = res.token;
-          saveStoredToken(res.token, true);
-          configureApiClient(getValidToken, null);
-          await applyAuthenticatedSession(res.user, res.schools, cleanEmail);
-          return {
-            requiresEmailConfirmation: false,
-            message: 'Account activated and signed in.',
-          };
-        }
-
-        const { data, error } = await supabaseClient.auth.signUp({
-          email: cleanEmail,
-          password,
-          ...(fullName?.trim() ? { options: { data: { full_name: fullName.trim() } } } : {}),
-        });
-
-        if (error) {
-          throw error;
-        }
-
-        const accessToken = data.session?.access_token;
-        if (!accessToken) {
-          return {
-            requiresEmailConfirmation: true,
-            message:
-              'Account created! Please check your email inbox to confirm your address, then sign in.',
-          };
-        }
-
-        setSupabaseUser(data.user ?? null);
-        configureApiClient(async () => accessToken, null);
-        const synced = await platformApi.syncSession();
-        configureApiClient(getValidToken, null);
-        await applyAuthenticatedSession(synced.user, synced.schools, cleanEmail);
-
-        return {
-          requiresEmailConfirmation: false,
-          message: 'Account created and signed in.',
-        };
-      } catch (err: unknown) {
-        localTokenRef.current = null;
-        clearStoredToken();
-        const friendly = formatFriendlyAuthError(err);
-        setAuthError(friendly);
-        throw new Error(friendly);
-      } finally {
-        handlingManualSupabaseAuthRef.current = false;
         setAuthLoading(false);
       }
     },
@@ -770,7 +521,6 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     localTokenRef.current = null;
     clearStoredToken();
     setAuthProfile(null);
-    setSupabaseUser(null);
     setSchools([]);
     setAuditLogs([]);
     setActiveSchoolId(null);
@@ -779,10 +529,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     setSubscriptionPortalData(null);
     setWorkspaceError(null);
     setAuthError(null);
-    const supabaseClient = getSupabaseClient();
-    if (supabaseClient) {
-      await supabaseClient.auth.signOut().catch(() => undefined);
-    }
+    await platformApi.logoutSession().catch(() => undefined);
     if (typeof window !== 'undefined' && window.location.pathname !== '/') {
       window.history.pushState({}, '', '/');
     }
@@ -857,7 +604,6 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   );
 
   const value: SchoolContextValue = {
-    supabaseUser,
     authProfile,
     authLoading,
     authError,
@@ -875,7 +621,6 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     recentAccounts,
     removeRecentAccount,
     signInWithCredentials,
-    signUpWithEmail,
     signOutWorkspace,
     refreshPlatformData,
     refreshTenantWorkspace,

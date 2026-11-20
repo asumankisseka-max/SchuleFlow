@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import {
   AlertCircle,
+  Copy,
   Download,
   FileSpreadsheet,
   KeyRound,
@@ -23,6 +24,12 @@ import {
   parseStaffDirectoryExcel,
   type StaffDirectoryImportRow,
 } from '../utils/excel';
+import {
+  extractSchoolInitials,
+  formatStaffId,
+  generateNextStaffId,
+  getNextSequenceNumber,
+} from '../utils/idGenerator';
 import { isTeachingRole, ROLE_DISPLAY_NAMES } from '../utils/rbac';
 import { validateUgandanPhone } from '../utils/validation';
 
@@ -70,6 +77,26 @@ export function UserManagementView({
   const [importError, setImportError] = useState<string | null>(null);
   const staffFileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const schoolInitials = extractSchoolInitials(schoolName);
+  const nextStaffIdPreview = generateNextStaffId(
+    schoolInitials,
+    users.map((u) => u.staffId),
+    true
+  );
+  const nextStaffSeqStart = getNextSequenceNumber(
+    users.map((u) => u.staffId),
+    'TCH'
+  );
+
+  const copyStaffId = async (staffId: string) => {
+    try {
+      await navigator.clipboard?.writeText(staffId);
+      setNotice(`Copied Staff ID ${staffId} to clipboard.`);
+    } catch {
+      setNotice(`Staff ID: ${staffId}`);
+    }
+  };
+
   const openAdd = () => {
     setEditingUser(null);
     setName('');
@@ -115,6 +142,7 @@ export function UserManagementView({
 
     const payload: UserAccount = {
       id: editingUser?.id ?? `usr-${Date.now()}`,
+      staffId: editingUser?.staffId,
       name: name.trim(),
       email: email.trim().toLowerCase(),
       username: username.trim().toLowerCase(),
@@ -250,6 +278,7 @@ export function UserManagementView({
           <table className="w-full border-collapse text-left text-xs">
             <thead>
               <tr className="border-b border-slate-200 bg-slate-50 font-semibold text-slate-700">
+                <th className="py-2.5 px-3">Staff ID</th>
                 <th className="py-2.5 px-3">Staff Name</th>
                 <th className="py-2.5 px-3">Username / Email</th>
                 <th className="py-2.5 px-3">Role</th>
@@ -261,6 +290,21 @@ export function UserManagementView({
             <tbody className="divide-y divide-slate-200">
               {users.map((u) => (
                 <tr key={u.id} className="hover:bg-slate-50/70">
+                  <td className="py-2.5 px-3 whitespace-nowrap">
+                    {u.staffId ? (
+                      <button
+                        type="button"
+                        onClick={() => void copyStaffId(u.staffId!)}
+                        title="Click to copy Staff ID"
+                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-800 hover:bg-slate-100"
+                      >
+                        <span>{u.staffId}</span>
+                        <Copy className="h-2.5 w-2.5 text-slate-400" />
+                      </button>
+                    ) : (
+                      <span className="font-mono text-[11px] text-slate-400">Pending</span>
+                    )}
+                  </td>
                   <td className="py-2.5 px-3 font-semibold text-slate-900">
                     {u.name}
                     {u.id === currentUserId && (
@@ -308,12 +352,12 @@ export function UserManagementView({
                         type="button"
                         onClick={() => {
                           onResetPassword(u.id);
-                          setNotice(`Google Auth sign-in verified for ${u.name} (${u.email}).`);
+                          openEdit(u);
                         }}
                         className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
                       >
                         <KeyRound className="h-3 w-3" />
-                        <span>Google Auth</span>
+                        <span>Reset Password</span>
                       </button>
                       {u.id !== currentUserId && (
                         <button
@@ -380,6 +424,14 @@ export function UserManagementView({
                   {formError}
                 </div>
               )}
+              <div className="rounded-md border border-blue-200 bg-blue-50/70 px-3 py-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-blue-900">
+                  {editingUser ? 'Assigned Staff Login ID' : 'Auto-Generated Staff ID'}
+                </span>
+                <span className="font-mono text-xs font-bold text-blue-950">
+                  {editingUser ? editingUser.staffId || 'Assigned on save' : nextStaffIdPreview}
+                </span>
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">Full Name *</label>
@@ -565,6 +617,7 @@ export function UserManagementView({
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
+                      <th className="py-2 px-3">Assigned Staff ID</th>
                       <th className="py-2 px-3">Name</th>
                       <th className="py-2 px-3">Email</th>
                       <th className="py-2 px-3">Role</th>
@@ -574,34 +627,46 @@ export function UserManagementView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {importRows.map((row) => (
-                      <tr key={row.rowNumber}>
-                        <td className="py-2 px-3 font-medium text-slate-900">{row.name || 'Missing'}</td>
-                        <td className="py-2 px-3 font-mono text-slate-700">{row.email || 'Missing'}</td>
-                        <td className="py-2 px-3">{ROLE_DISPLAY_NAMES[row.role]}</td>
-                        <td className="py-2 px-3 font-mono">
-                          {row.phoneInvalid ? (
-                            <span className="text-red-700">{row.phone || 'Invalid'}</span>
-                          ) : (
-                            row.phone || '—'
-                          )}
-                        </td>
-                        <td className="py-2 px-3 text-slate-600">
-                          {row.assignedClassNames.join(', ') || '—'}
-                        </td>
-                        <td className="py-2 px-3">
-                          {row.isDuplicate ? (
-                            <span className="text-amber-700 font-medium">Duplicate / Skipped</span>
-                          ) : row.phoneInvalid ? (
-                            <span className="text-red-700 font-medium">Invalid Ugandan Phone</span>
-                          ) : !row.name || !row.email ? (
-                            <span className="text-red-700 font-medium">Missing Required Fields</span>
-                          ) : (
-                            <span className="text-emerald-700 font-medium">Ready to Import</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {(() => {
+                      let seqOffset = 0;
+                      return importRows.map((row) => {
+                        const isReady = !row.isDuplicate && !row.phoneInvalid && Boolean(row.name && row.email);
+                        const projectedId = isReady
+                          ? formatStaffId(schoolInitials, nextStaffSeqStart + seqOffset++)
+                          : '—';
+                        return (
+                          <tr key={row.rowNumber}>
+                            <td className="py-2 px-3 font-mono font-semibold text-blue-900">
+                              {projectedId}
+                            </td>
+                            <td className="py-2 px-3 font-medium text-slate-900">{row.name || 'Missing'}</td>
+                            <td className="py-2 px-3 font-mono text-slate-700">{row.email || 'Missing'}</td>
+                            <td className="py-2 px-3">{ROLE_DISPLAY_NAMES[row.role]}</td>
+                            <td className="py-2 px-3 font-mono">
+                              {row.phoneInvalid ? (
+                                <span className="text-red-700">{row.phone || 'Invalid'}</span>
+                              ) : (
+                                row.phone || '—'
+                              )}
+                            </td>
+                            <td className="py-2 px-3 text-slate-600">
+                              {row.assignedClassNames.join(', ') || '—'}
+                            </td>
+                            <td className="py-2 px-3">
+                              {row.isDuplicate ? (
+                                <span className="text-amber-700 font-medium">Duplicate / Skipped</span>
+                              ) : row.phoneInvalid ? (
+                                <span className="text-red-700 font-medium">Invalid Ugandan Phone</span>
+                              ) : !row.name || !row.email ? (
+                                <span className="text-red-700 font-medium">Missing Required Fields</span>
+                              ) : (
+                                <span className="text-emerald-700 font-medium">Ready to Import</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
                 </table>
               </div>

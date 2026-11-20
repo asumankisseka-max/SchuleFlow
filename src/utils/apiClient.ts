@@ -61,6 +61,7 @@ async function requestJson<T>(
 
   const response = await fetch(url, {
     ...options,
+    credentials: 'include',
     headers,
   });
 
@@ -86,39 +87,30 @@ async function requestJson<T>(
 }
 
 export const platformApi = {
-  getAuthConfig: () =>
-    requestJson<{ supabaseUrl: string | null; supabaseAnonKey: string | null }>(
-      '/api/v1/auth/config',
+  lookupSchoolByCode: (code: string) =>
+    requestJson<{ school: PublicSchoolBranding }>(
+      `/api/v1/auth/school-lookup?code=${encodeURIComponent(code.trim())}`,
       { method: 'GET' },
       null
     ),
 
-  listPublicSchoolBranding: () =>
-    requestJson<{ schools: PublicSchoolBranding[] }>(
-      '/api/v1/auth/schools-branding',
-      { method: 'GET' },
-      null
-    ),
-
-  registerEmail: (email: string, password: string, fullName?: string) =>
-    requestJson<{ token: string; user: AuthSessionProfile; schools: SchoolTenant[] }>(
-      '/api/v1/auth/register',
-      {
-        method: 'POST',
-        body: JSON.stringify({ email, password, ...(fullName ? { fullName } : {}) }),
-      },
-      null
-    ),
-
-  loginWithCredentials: (identifier: string, password: string, schoolId?: string) =>
+  loginWithCredentials: (params: {
+    schoolCode?: string;
+    identifier: string;
+    password: string;
+    mode?: 'school' | 'super_admin';
+  }) =>
     requestJson<{ token: string; user: AuthSessionProfile; schools: SchoolTenant[] }>(
       '/api/v1/auth/login',
       {
         method: 'POST',
-        body: JSON.stringify({ identifier, password, ...(schoolId ? { schoolId } : {}) }),
+        body: JSON.stringify(params),
       },
       null
     ),
+
+  logoutSession: () =>
+    requestJson<{ ok: boolean }>('/api/v1/auth/logout', { method: 'POST' }, null),
 
   syncSession: () =>
     requestJson<{ user: AuthSessionProfile; schools: SchoolTenant[] }>(
@@ -206,20 +198,14 @@ export const platformApi = {
       null
     ),
 
-  recoverySchools: () =>
-    requestJson<{ schools: Array<{ id: string; name: string; district: string }> }>(
-      '/api/v1/auth/recover/schools',
-      { method: 'GET' },
-      null
-    ),
-
-  recoveryLookup: (payload: { identifier?: string; schoolId?: string; fullName?: string }) =>
+  recoveryLookup: (payload: { identifier?: string; schoolCode?: string; fullName?: string }) =>
     requestJson<{
       recoveryToken: string;
       lookupMethod: 'identifier' | 'name_school';
       maskedEmail: string;
       maskedPhone: string | null;
       maskedUsername: string | null;
+      maskedStaffId: string | null;
       schoolName: string;
       schoolContactPhone: string | null;
       schoolContactEmail: string | null;
@@ -236,6 +222,8 @@ export const platformApi = {
       resetToken: string;
       account: {
         name: string;
+        staffId: string | null;
+        schoolCode: string | null;
         email: string;
         username: string;
         phone: string | null;

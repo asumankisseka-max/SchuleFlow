@@ -1,5 +1,16 @@
 import { useState } from 'react';
-import { AlertCircle, Building2, CheckCircle2, Eye, EyeOff, Loader2, X } from 'lucide-react';
+import {
+  AlertCircle,
+  Building2,
+  Check,
+  CheckCircle2,
+  Copy,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Loader2,
+  X,
+} from 'lucide-react';
 import type {
   CurriculumScope,
   SchoolStatus,
@@ -81,6 +92,8 @@ export function SchoolOnboardingModal({
   const [licenseExpiresAt, setLicenseExpiresAt] = useState<string>(() => defaultDateOffset(365));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [provisionedSchool, setProvisionedSchool] = useState<SchoolTenant | null>(null);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   if (!open) return null;
 
@@ -177,14 +190,111 @@ export function SchoolOnboardingModal({
         academicYear,
         termName,
       });
+      setProvisionedSchool(res.school);
       onOnboarded(res.school);
-      onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to provision new school tenant.');
     } finally {
       setSubmitting(false);
     }
   };
+
+  const handleCloseAfterSummary = () => {
+    setProvisionedSchool(null);
+    setCopiedCode(false);
+    setStep(1);
+    onClose();
+  };
+
+  if (provisionedSchool) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+        <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white overflow-hidden shadow-lg">
+          <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-emerald-50/70">
+            <div className="flex items-center gap-2.5">
+              <CheckCircle2 className="h-5 w-5 text-emerald-700" />
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900">
+                  School Onboarded Successfully
+                </h3>
+                <p className="text-xs text-slate-600">
+                  Share these private access credentials with the school administration
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleCloseAfterSummary}
+              className="p-1.5 rounded-md text-slate-500 hover:bg-slate-200"
+              aria-label="Close onboarding summary"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="p-6 space-y-4 text-xs">
+            <div>
+              <div className="text-sm font-bold text-slate-900">{provisionedSchool.name}</div>
+              <div className="text-slate-500 mt-0.5">
+                {provisionedSchool.ministryRegNo || 'MoES/SEC/—'} · {provisionedSchool.district}
+              </div>
+            </div>
+
+            <div className="rounded-lg border-2 border-blue-900/20 bg-blue-50/60 p-4 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-blue-900 flex items-center gap-1.5">
+                  <KeyRound className="h-3.5 w-3.5" />
+                  <span>Unique School Code (Required at Login)</span>
+                </div>
+                <div className="font-mono text-2xl font-bold tracking-wider text-slate-950 mt-1">
+                  {provisionedSchool.schoolCode}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const summary = `School: ${provisionedSchool.name}\nSchool Code: ${provisionedSchool.schoolCode}\nAdmin Staff ID: ${provisionedSchool.adminStaffId ?? '—'}\nAdmin Email: ${adminEmail}`;
+                  void navigator.clipboard?.writeText(summary);
+                  setCopiedCode(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-white px-3 py-1.5 text-xs font-semibold text-blue-900 hover:bg-blue-50"
+              >
+                {copiedCode ? <Check className="h-3.5 w-3.5 text-emerald-700" /> : <Copy className="h-3.5 w-3.5" />}
+                <span>{copiedCode ? 'Copied' : 'Copy Handover'}</span>
+              </button>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3.5 space-y-1.5 font-mono text-[11px] text-slate-800">
+              <div className="font-sans text-xs font-semibold text-slate-900 mb-1">
+                Primary School Admin Account
+              </div>
+              <div>
+                Staff ID: <span className="font-bold text-blue-950">{provisionedSchool.adminStaffId ?? '—'}</span>
+              </div>
+              <div>Email: {adminEmail.trim().toLowerCase()}</div>
+              <div>Username: {adminUsername.trim().toLowerCase() || adminEmail.split('@')[0]}</div>
+            </div>
+
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Schools are kept strictly private and never appear in public login dropdowns. Staff
+              must enter <strong>{provisionedSchool.schoolCode}</strong> together with their Staff ID
+              or email and personal password to access this workspace.
+            </p>
+
+            <div className="flex justify-end pt-2 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={handleCloseAfterSummary}
+                className="rounded-md bg-blue-900 px-5 py-2 text-xs font-semibold text-white hover:bg-blue-950"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">

@@ -5,11 +5,14 @@ const TOKEN_PREFIX = 'sf_sess.';
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface LocalSessionPayload {
+  userId?: number;
   uid: string;
+  staffId?: string;
   email: string;
   name: string;
   globalRole: GlobalRole;
   schoolId: string | null;
+  role: UserRole;
   schoolRole: UserRole;
   exp: number;
 }

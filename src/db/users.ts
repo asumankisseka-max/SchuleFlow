@@ -1,4 +1,3 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import {
   hashPassword,
@@ -7,50 +6,23 @@ import {
   verifyRecoveryToken,
   type RecoveryLookupMethod,
 } from '../lib/passwordAuth.ts';
-import type { AuthSessionProfile, UserRole } from '../types.ts';
+import type { AuthSessionProfile, PublicSchoolBranding, UserRole } from '../types.ts';
 import { normalizeUserRole, ROLE_DISPLAY_NAMES } from '../utils/rbac.ts';
+import { DEFAULT_UNIFORM_PRIMARY, DEFAULT_UNIFORM_SECONDARY } from '../utils/schoolTheme.ts';
 import { buildPhoneLoginCandidates, normalizeStoredPhone } from '../utils/validation.ts';
 import { db } from './index.ts';
 import { schools, staffTeachers, users } from './schema.ts';
 
-function safeStringEqual(a: string, b: string): boolean {
-  const hashA = createHash('sha256').update(a).digest();
-  const hashB = createHash('sha256').update(b).digest();
-  return timingSafeEqual(hashA, hashB);
-}
-
-function getEnvSuperAdminConfig(): { email: string; password: string } | null {
-  const email = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
-  const password = process.env.SUPER_ADMIN_PASSWORD?.trim();
-  if (!email) return null;
-  return { email, password: password ?? '' };
-}
-
-function isEnvSuperAdminEmail(email: string): boolean {
-  const cfg = getEnvSuperAdminConfig();
-  return Boolean(cfg && email.trim().toLowerCase() === cfg.email);
-}
-
-async function findMatchingStaffByEmail(
-  cleanEmail: string,
-  preferredSchoolId?: string | null
-) {
-  const rows = await db
-    .select()
-    .from(staffTeachers)
-    .where(sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`);
-  if (rows.length === 0) return null;
-  if (preferredSchoolId) {
-    const exact = rows.find((r) => r.schoolId === preferredSchoolId);
-    if (exact) return exact;
-  }
-  return rows.find((r) => r.active) ?? rows[0];
-}
-
-function toProfile(row: typeof users.$inferSelect): AuthSessionProfile {
+function toProfile(
+  row: typeof users.$inferSelect,
+  schoolCode?: string | null
+): AuthSessionProfile {
   const globalRole = row.globalRole as AuthSessionProfile['globalRole'];
   return {
+    userId: row.id,
     uid: row.uid,
+    staffId: row.staffId ?? undefined,
+    schoolCode: globalRole === 'super_admin' ? null : schoolCode ?? null,
     email: row.email,
     username: row.username ?? row.email.split('@')[0],
     phone: row.phone ?? undefined,
@@ -65,307 +37,109 @@ function toProfile(row: typeof users.$inferSelect): AuthSessionProfile {
 export async function getUserProfileByUid(uid: string): Promise<AuthSessionProfile | null> {
   try {
     const rows = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
-    if (!rows[0]) return null;
-    return toProfile(rows[0]);
+    const row = rows[0];
+    if (!row) return null;
+
+    let schoolCode: string | null = null;
+    if (row.globalRole !== 'super_admin' && row.schoolId) {
+      const schRows = await db
+        .select({ schoolCode: schools.schoolCode })
+        .from(schools)
+        .where(eq(schools.id, row.schoolId))
+        .limit(1);
+      schoolCode = schRows[0]?.schoolCode ?? null;
+    }
+
+    return toProfile(row, schoolCode);
   } catch (error) {
     console.error('Database error loading user by uid:', error);
     return null;
   }
 }
 
-export async function getOrCreateUser(
-  uid: string,
-  email: string,
-  displayName?: string
-): Promise<AuthSessionProfile> {
-  try {
-    const cleanEmail = email.trim().toLowerCase();
-    const fallbackName = displayName?.trim() || cleanEmail.split('@')[0] || 'Staff User';
+export async function lookupSchoolByCode(
+  schoolCode: string
+): Promise<PublicSchoolBranding | null> {
+  const cleanCode = schoolCode.trim().toUpperCase();
+  if (!cleanCode) return null;
 
-    const [existingByUidRows, existingByEmailRows, matchedStaff, superAdmins] = await Promise.all([
-      db.select().from(users).where(eq(users.uid, uid)).limit(1),
-      db
-        .select()
-        .from(users)
-        .where(sql`lower(trim(${users.email})) = ${cleanEmail}`)
-        .limit(5),
-      findMatchingStaffByEmail(cleanEmail),
-      db.select({ id: users.id }).from(users).where(eq(users.globalRole, 'super_admin')).limit(1),
-    ]);
+  const rows = await db
+    .select({
+      id: schools.id,
+      schoolCode: schools.schoolCode,
+      name: schools.name,
+      subdomain: schools.subdomain,
+      district: schools.district,
+      logoUrl: schools.logoUrl,
+      primaryColor: schools.primaryColor,
+      secondaryColor: schools.secondaryColor,
+    })
+    .from(schools)
+    .where(sql`upper(trim(${schools.schoolCode})) = ${cleanCode}`)
+    .limit(1);
 
-    const existing = existingByUidRows[0];
-    const byEmail =
-      existingByEmailRows.find((u) => u.globalRole === 'super_admin') ??
-      existingByEmailRows.find((u) => u.active && Boolean(u.schoolId)) ??
-      existingByEmailRows[0];
+  const row = rows[0];
+  if (!row) return null;
 
-    const isSuperAdmin =
-      isEnvSuperAdminEmail(cleanEmail) ||
-      existing?.globalRole === 'super_admin' ||
-      byEmail?.globalRole === 'super_admin' ||
-      (superAdmins.length === 0 && !matchedStaff);
+  return {
+    id: row.id,
+    schoolCode: row.schoolCode,
+    name: row.name,
+    subdomain: row.subdomain,
+    district: row.district,
+    logoUrl: row.logoUrl,
+    primaryColor: row.primaryColor || DEFAULT_UNIFORM_PRIMARY,
+    secondaryColor: row.secondaryColor || DEFAULT_UNIFORM_SECONDARY,
+  };
+}
 
-    if (isSuperAdmin) {
-      const targetRow = existing ?? byEmail;
-      if (targetRow) {
-        if (!targetRow.active) {
-          throw new Error('Account deactivated. Please contact Platform Support.');
-        }
-        const updated = await db
-          .update(users)
-          .set({
-            uid,
-            email: cleanEmail,
-            name: displayName?.trim() || targetRow.name || fallbackName,
-            globalRole: 'super_admin',
-            schoolId: null,
-            lastLogin: new Date(),
-          })
-          .where(eq(users.id, targetRow.id))
-          .returning();
-        return toProfile(updated[0]);
-      }
-
-      const inserted = await db
-        .insert(users)
-        .values({
-          uid,
-          email: cleanEmail,
-          username: cleanEmail.split('@')[0],
-          name: fallbackName,
-          globalRole: 'super_admin',
-          schoolId: null,
-          schoolRole: 'school_admin',
-          active: true,
-          lastLogin: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: users.uid,
-          set: {
-            email: cleanEmail,
-            globalRole: 'super_admin',
-            schoolId: null,
-            lastLogin: new Date(),
-          },
-        })
-        .returning();
-      return toProfile(inserted[0]);
-    }
-
-    // Standard non-super-admin user: verify active status & tenant assignment against staff_teachers (db.users)
-    if (matchedStaff && !matchedStaff.active) {
-      throw new Error('Account deactivated. Please contact your School Administrator.');
-    }
-
-    const targetRow = existing ?? byEmail;
-    if (targetRow && !targetRow.active && !matchedStaff) {
-      throw new Error('Account deactivated. Please contact your School Administrator.');
-    }
-
-    const resolvedSchoolId = matchedStaff?.schoolId ?? targetRow?.schoolId ?? null;
-    if (!resolvedSchoolId) {
-      throw new Error(
-        'Account not assigned to an active school workspace. Contact your School Administrator.'
-      );
-    }
-
-    const schoolCheck = await db
-      .select({ id: schools.id })
-      .from(schools)
-      .where(eq(schools.id, resolvedSchoolId))
-      .limit(1);
-    if (!schoolCheck[0]) {
-      throw new Error(
-        'Account not assigned to an active school workspace. Contact your School Administrator.'
-      );
-    }
-
-    const resolvedSchoolRole: UserRole = normalizeUserRole(
-      matchedStaff?.role ?? targetRow?.schoolRole
-    );
-    const resolvedPhone = normalizeStoredPhone(matchedStaff?.phone ?? targetRow?.phone);
-    const resolvedName =
-      matchedStaff?.name || displayName?.trim() || targetRow?.name || fallbackName;
-    const resolvedUsername =
-      matchedStaff?.username?.toLowerCase() ??
-      targetRow?.username ??
-      cleanEmail.split('@')[0];
-
-    if (!matchedStaff) {
-      await db
-        .insert(staffTeachers)
-        .values({
-          id: `${resolvedSchoolId}:usr-${uid}`,
-          schoolId: resolvedSchoolId,
-          name: resolvedName,
-          email: cleanEmail,
-          username: resolvedUsername,
-          passwordHash: targetRow?.passwordHash ?? null,
-          role: resolvedSchoolRole,
-          active: targetRow ? targetRow.active : true,
-          phone: resolvedPhone,
-          assignedClassIds: [],
-          assignedSubjectIds: [],
-        })
-        .onConflictDoNothing();
-    }
-
-    if (targetRow) {
-      const updated = await db
-        .update(users)
-        .set({
-          uid,
-          email: cleanEmail,
-          username: resolvedUsername,
-          phone: resolvedPhone,
-          name: resolvedName,
-          globalRole: 'school_user',
-          schoolId: resolvedSchoolId,
-          schoolRole: resolvedSchoolRole,
-          active: matchedStaff ? matchedStaff.active : targetRow.active,
-          lastLogin: new Date(),
-        })
-        .where(eq(users.id, targetRow.id))
-        .returning();
-      return toProfile(updated[0]);
-    }
-
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid,
-        email: cleanEmail,
-        username: resolvedUsername,
-        phone: resolvedPhone,
-        passwordHash: matchedStaff?.passwordHash ?? null,
-        name: resolvedName,
-        globalRole: 'school_user',
-        schoolId: resolvedSchoolId,
-        schoolRole: resolvedSchoolRole,
-        active: true,
-        lastLogin: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email: cleanEmail,
-          phone: resolvedPhone,
-          schoolId: resolvedSchoolId,
-          schoolRole: resolvedSchoolRole,
-          lastLogin: new Date(),
-        },
-      })
-      .returning();
-
-    return toProfile(inserted[0]);
-  } catch (error) {
-    console.error('Database error syncing user:', error);
-    if (
-      error instanceof Error &&
-      (error.message.includes('Account deactivated') ||
-        error.message.includes('Account not assigned to an active school workspace') ||
-        error.message.includes('No active school staff account'))
-    ) {
-      throw error;
-    }
-    throw new Error('Failed to synchronize authenticated user profile.', { cause: error });
+export class AuthValidationError extends Error {
+  status: number;
+  constructor(message: string, status = 401) {
+    super(message);
+    this.status = status;
   }
 }
 
-export async function authenticateWithCredentials(
-  identifier: string,
-  password: string,
-  schoolId?: string
-): Promise<AuthSessionProfile | null> {
-  const clean = identifier.trim().toLowerCase();
-  const cleanSchoolId = schoolId?.trim() || null;
-  if (!clean || !password) return null;
+export async function authenticateWithCredentials(params: {
+  schoolCode?: string;
+  identifier: string;
+  password: string;
+  mode?: 'school' | 'super_admin';
+}): Promise<AuthSessionProfile | null> {
+  const cleanIdentifier = params.identifier.trim().toLowerCase();
+  const cleanSchoolCode = params.schoolCode?.trim().toUpperCase() || '';
+  const password = params.password;
+  const mode = params.mode ?? (cleanSchoolCode ? 'school' : 'super_admin');
 
-  // Optional environment-based Super Admin credential verification
-  const envAdmin = getEnvSuperAdminConfig();
-  if (envAdmin && envAdmin.password && clean === envAdmin.email && safeStringEqual(password, envAdmin.password)) {
-    const existingEnvAdmin = await db
-      .select()
-      .from(users)
-      .where(sql`lower(trim(${users.email})) = ${envAdmin.email}`)
-      .limit(1);
-
-    if (existingEnvAdmin[0]) {
-      const updated = await db
-        .update(users)
-        .set({
-          globalRole: 'super_admin',
-          schoolId: null,
-          active: true,
-          lastLogin: new Date(),
-        })
-        .where(eq(users.id, existingEnvAdmin[0].id))
-        .returning();
-      return toProfile(updated[0]);
-    }
-
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid: `env:super_admin:${envAdmin.email}`,
-        email: envAdmin.email,
-        username: envAdmin.email.split('@')[0],
-        passwordHash: hashPassword(password),
-        name: 'Platform Super Admin',
-        globalRole: 'super_admin',
-        schoolId: null,
-        schoolRole: 'school_admin',
-        active: true,
-        lastLogin: new Date(),
-      })
-      .returning();
-    return toProfile(inserted[0]);
+  if (!cleanIdentifier || !password) {
+    return null;
   }
 
-  const phoneCandidates = buildPhoneLoginCandidates(identifier);
-  const userPhonePredicate =
-    phoneCandidates.length > 0
-      ? inArray(
-          sql`regexp_replace(COALESCE(${users.phone}, ''), '[\\s()-]+', '', 'g')`,
-          phoneCandidates
-        )
-      : undefined;
-
-  const userIdentifierMatch = or(
-    sql`lower(trim(${users.email})) = ${clean}`,
-    sql`lower(trim(${users.username})) = ${clean}`,
-    ...(userPhonePredicate ? [userPhonePredicate] : [])
-  );
-
-  const matchedUsers = await db
-    .select()
-    .from(users)
-    .where(
-      cleanSchoolId
-        ? and(
-            userIdentifierMatch,
-            or(eq(users.schoolId, cleanSchoolId), eq(users.globalRole, 'super_admin'))
+  // 1. Platform Super Admin Login (database-backed PostgreSQL users table, no schoolCode required)
+  if (mode === 'super_admin') {
+    const superAdminRows = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.globalRole, 'super_admin'),
+          or(
+            sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
+            sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`
           )
-        : userIdentifierMatch
-    )
-    .limit(15);
+        )
+      )
+      .limit(5);
 
-  // If a school was explicitly selected, prefer that school's user record first
-  const orderedUsers = cleanSchoolId
-    ? [...matchedUsers].sort((a, b) => {
-        const aExact = a.schoolId === cleanSchoolId ? 0 : 1;
-        const bExact = b.schoolId === cleanSchoolId ? 0 : 1;
-        return aExact - bExact;
-      })
-    : matchedUsers;
-
-  for (const row of orderedUsers) {
-    if (verifyPassword(password, row.passwordHash)) {
-      if (!row.active) {
-        throw new Error('Account deactivated. Please contact your School Administrator.');
-      }
-      const isSuperAdmin = row.globalRole === 'super_admin' || isEnvSuperAdminEmail(row.email);
-      if (isSuperAdmin) {
+    for (const row of superAdminRows) {
+      if (verifyPassword(password, row.passwordHash)) {
+        if (!row.active) {
+          throw new AuthValidationError(
+            'Account deactivated. Please contact Platform Support.',
+            403
+          );
+        }
         const updated = await db
           .update(users)
           .set({
@@ -375,27 +149,94 @@ export async function authenticateWithCredentials(
           })
           .where(eq(users.id, row.id))
           .returning();
-        return toProfile(updated[0]);
+        return toProfile(updated[0], null);
+      }
+    }
+    return null;
+  }
+
+  // 2. School Workspace Login: School Code is mandatory and isolates the user query strictly to school_id
+  if (!cleanSchoolCode) {
+    throw new AuthValidationError('School Code is required for school staff sign-in.', 400);
+  }
+
+  const schoolRows = await db
+    .select()
+    .from(schools)
+    .where(sql`upper(trim(${schools.schoolCode})) = ${cleanSchoolCode}`)
+    .limit(1);
+
+  const school = schoolRows[0];
+  if (!school) {
+    throw new AuthValidationError(
+      'Invalid School Code. Verify the code with your School Administrator.',
+      401
+    );
+  }
+
+  const phoneCandidates = buildPhoneLoginCandidates(params.identifier);
+  const userPhonePredicate =
+    phoneCandidates.length > 0
+      ? inArray(
+          sql`regexp_replace(COALESCE(${users.phone}, ''), '[\\s()-]+', '', 'g')`,
+          phoneCandidates
+        )
+      : undefined;
+
+  const userRows = await db
+    .select()
+    .from(users)
+    .where(
+      and(
+        eq(users.schoolId, school.id),
+        or(
+          sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${cleanIdentifier}`,
+          sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
+          sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`,
+          ...(userPhonePredicate ? [userPhonePredicate] : [])
+        )
+      )
+    )
+    .limit(10);
+
+  for (const row of userRows) {
+    if (verifyPassword(password, row.passwordHash)) {
+      if (!row.active) {
+        throw new AuthValidationError(
+          'Account deactivated. Please contact your School Administrator.',
+          403
+        );
       }
 
-      const matchedStaff = await findMatchingStaffByEmail(
-        row.email.trim().toLowerCase(),
-        cleanSchoolId ?? row.schoolId
-      );
+      const cleanEmail = row.email.trim().toLowerCase();
+      const staffMatchRows = await db
+        .select()
+        .from(staffTeachers)
+        .where(
+          and(
+            eq(staffTeachers.schoolId, school.id),
+            or(
+              row.staffId
+                ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${row.staffId.toLowerCase()}`
+                : sql`false`,
+              sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+            )
+          )
+        )
+        .limit(1);
+
+      const matchedStaff = staffMatchRows[0];
       if (matchedStaff && !matchedStaff.active) {
-        throw new Error('Account deactivated. Please contact your School Administrator.');
-      }
-
-      const effectiveSchoolId = matchedStaff?.schoolId ?? row.schoolId;
-      if (!effectiveSchoolId) {
-        throw new Error(
-          'Account not assigned to an active school workspace. Contact your School Administrator.'
+        throw new AuthValidationError(
+          'Account deactivated. Please contact your School Administrator.',
+          403
         );
       }
 
       const effectiveRole = matchedStaff
         ? normalizeUserRole(matchedStaff.role)
         : normalizeUserRole(row.schoolRole);
+      const effectiveStaffId = matchedStaff?.staffId ?? row.staffId ?? null;
 
       if (matchedStaff) {
         await db
@@ -407,17 +248,19 @@ export async function authenticateWithCredentials(
       const updated = await db
         .update(users)
         .set({
-          schoolId: effectiveSchoolId,
+          staffId: effectiveStaffId,
+          schoolId: school.id,
           schoolRole: effectiveRole,
           lastLogin: new Date(),
         })
         .where(eq(users.id, row.id))
         .returning();
-      return toProfile(updated[0]);
+
+      return toProfile(updated[0], school.schoolCode);
     }
   }
 
-  // Fallback: check staff_teachers directly if a staff row was seeded or lacks synced users.phone
+  // Fallback check strictly scoped to staff_teachers WHERE school_id = $school.id
   const staffPhonePredicate =
     phoneCandidates.length > 0
       ? inArray(
@@ -426,268 +269,77 @@ export async function authenticateWithCredentials(
         )
       : undefined;
 
-  const staffIdentifierMatch = or(
-    sql`lower(trim(${staffTeachers.email})) = ${clean}`,
-    sql`lower(trim(${staffTeachers.username})) = ${clean}`,
-    ...(staffPhonePredicate ? [staffPhonePredicate] : [])
-  );
-
-  const matchedStaffList = await db
+  const staffList = await db
     .select()
     .from(staffTeachers)
     .where(
-      cleanSchoolId
-        ? and(eq(staffTeachers.schoolId, cleanSchoolId), staffIdentifierMatch)
-        : staffIdentifierMatch
+      and(
+        eq(staffTeachers.schoolId, school.id),
+        or(
+          sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${cleanIdentifier}`,
+          sql`lower(trim(${staffTeachers.email})) = ${cleanIdentifier}`,
+          sql`lower(trim(${staffTeachers.username})) = ${cleanIdentifier}`,
+          ...(staffPhonePredicate ? [staffPhonePredicate] : [])
+        )
+      )
     )
-    .limit(15);
+    .limit(10);
 
-  for (const staff of matchedStaffList) {
+  for (const staff of staffList) {
     if (verifyPassword(password, staff.passwordHash)) {
       if (!staff.active) {
-        throw new Error('Account deactivated. Please contact your School Administrator.');
-      }
-      if (!staff.schoolId) {
-        throw new Error(
-          'Account not assigned to an active school workspace. Contact your School Administrator.'
+        throw new AuthValidationError(
+          'Account deactivated. Please contact your School Administrator.',
+          403
         );
       }
 
       const staffEmail = staff.email.trim().toLowerCase();
       const normalizedPhone = normalizeStoredPhone(staff.phone);
-      const existingByEmail = await db
-        .select()
-        .from(users)
-        .where(sql`lower(trim(${users.email})) = ${staffEmail}`)
-        .limit(1);
-
-      if (existingByEmail[0]) {
-        await db
-          .update(staffTeachers)
-          .set({ lastLogin: new Date().toISOString() })
-          .where(eq(staffTeachers.id, staff.id));
-
-        const updated = await db
-          .update(users)
-          .set({
-            phone: normalizedPhone ?? existingByEmail[0].phone,
-            schoolId: staff.schoolId,
-            schoolRole: normalizeUserRole(staff.role),
-            active: staff.active,
-            lastLogin: new Date(),
-          })
-          .where(eq(users.id, existingByEmail[0].id))
-          .returning();
-        return toProfile(updated[0]);
-      }
+      const effectiveRole = normalizeUserRole(staff.role);
+      const localUid = staff.id.includes(':')
+        ? `local:${staff.id}`
+        : `local:${school.id}:${staff.id}`;
 
       await db
         .update(staffTeachers)
         .set({ lastLogin: new Date().toISOString() })
         .where(eq(staffTeachers.id, staff.id));
 
-      const localUid = staff.id.includes(':')
-        ? `local:${staff.id}`
-        : `local:${staff.schoolId}:${staff.id}`;
       const inserted = await db
         .insert(users)
         .values({
           uid: localUid,
+          staffId: staff.staffId,
           email: staffEmail,
           username: staff.username.toLowerCase(),
           phone: normalizedPhone,
           passwordHash: staff.passwordHash,
           name: staff.name,
           globalRole: 'school_user',
-          schoolId: staff.schoolId,
-          schoolRole: normalizeUserRole(staff.role),
+          schoolId: school.id,
+          schoolRole: effectiveRole,
           active: staff.active,
           lastLogin: new Date(),
         })
         .onConflictDoUpdate({
           target: users.uid,
           set: {
+            staffId: staff.staffId,
             phone: normalizedPhone,
-            schoolId: staff.schoolId,
-            lastLogin: new Date(),
-            schoolRole: normalizeUserRole(staff.role),
+            schoolId: school.id,
+            schoolRole: effectiveRole,
             active: staff.active,
+            lastLogin: new Date(),
           },
         })
         .returning();
-      return toProfile(inserted[0]);
+
+      return toProfile(inserted[0], school.schoolCode);
     }
   }
 
   return null;
-}
-
-export async function registerAssignedStaffEmail(
-  email: string,
-  password: string,
-  fullName?: string
-): Promise<AuthSessionProfile> {
-  const cleanEmail = email.trim().toLowerCase();
-  const trimmedPassword = password.trim();
-  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-    throw new Error('Please enter a valid email address.');
-  }
-  if (trimmedPassword.length < 6) {
-    throw new Error('Password must be at least 6 characters.');
-  }
-
-  const [existingUserRows, matchedStaff, superAdmins] = await Promise.all([
-    db
-      .select()
-      .from(users)
-      .where(sql`lower(trim(${users.email})) = ${cleanEmail}`)
-      .limit(5),
-    findMatchingStaffByEmail(cleanEmail),
-    db.select({ id: users.id }).from(users).where(eq(users.globalRole, 'super_admin')).limit(1),
-  ]);
-
-  const existingUser =
-    existingUserRows.find((u) => u.globalRole === 'super_admin') ??
-    existingUserRows.find((u) => u.active && Boolean(u.schoolId)) ??
-    existingUserRows[0];
-
-  const isExistingSuperAdmin =
-    isEnvSuperAdminEmail(cleanEmail) || existingUser?.globalRole === 'super_admin';
-  if (isExistingSuperAdmin) {
-    throw new Error('An account with this email already exists. Please sign in instead.');
-  }
-
-  // First-time platform bootstrap super admin only when no super_admin and no staff record exist
-  if (superAdmins.length === 0 && !matchedStaff && !existingUser) {
-    const fallbackName = fullName?.trim() || cleanEmail.split('@')[0] || 'Platform Super Admin';
-    const nextHash = hashPassword(trimmedPassword);
-    const inserted = await db
-      .insert(users)
-      .values({
-        uid: `registered:super_admin:${cleanEmail}`,
-        email: cleanEmail,
-        username: cleanEmail.split('@')[0],
-        passwordHash: nextHash,
-        name: fallbackName,
-        globalRole: 'super_admin',
-        schoolId: null,
-        schoolRole: 'school_admin',
-        active: true,
-        lastLogin: new Date(),
-      })
-      .returning();
-    return toProfile(inserted[0]);
-  }
-
-  if (matchedStaff && !matchedStaff.active) {
-    throw new Error('Account deactivated. Please contact your School Administrator.');
-  }
-  if (existingUser && !existingUser.active && !matchedStaff) {
-    throw new Error('Account deactivated. Please contact your School Administrator.');
-  }
-
-  const resolvedSchoolId = matchedStaff?.schoolId ?? existingUser?.schoolId ?? null;
-  if (!resolvedSchoolId) {
-    throw new Error(
-      'Account not assigned to an active school workspace. Contact your School Administrator to add your email first.'
-    );
-  }
-
-  const schoolCheck = await db
-    .select({ id: schools.id })
-    .from(schools)
-    .where(eq(schools.id, resolvedSchoolId))
-    .limit(1);
-  if (!schoolCheck[0]) {
-    throw new Error(
-      'Account not assigned to an active school workspace. Contact your School Administrator.'
-    );
-  }
-
-  const currentHash = matchedStaff?.passwordHash ?? existingUser?.passwordHash ?? null;
-  const hasActivatedLogin = Boolean(
-    matchedStaff?.lastLogin || existingUser?.uid.startsWith('registered:')
-  );
-  const hasCustomPassword = Boolean(
-    currentHash && !verifyPassword('SchuleFlow2026!', currentHash)
-  );
-
-  if (hasActivatedLogin || hasCustomPassword) {
-    throw new Error(
-      'An account with this email is already registered. Please sign in instead or use "Forgot login info?".'
-    );
-  }
-
-  const nextHash = hashPassword(trimmedPassword);
-  const resolvedRole = normalizeUserRole(matchedStaff?.role ?? existingUser?.schoolRole);
-  const resolvedName = fullName?.trim() || matchedStaff?.name || existingUser?.name || cleanEmail.split('@')[0];
-  const resolvedUsername =
-    matchedStaff?.username?.toLowerCase() ??
-    existingUser?.username ??
-    cleanEmail.split('@')[0];
-  const resolvedPhone = normalizeStoredPhone(matchedStaff?.phone ?? existingUser?.phone);
-  const nowIso = new Date().toISOString();
-
-  if (matchedStaff) {
-    await db
-      .update(staffTeachers)
-      .set({
-        passwordHash: nextHash,
-        name: resolvedName,
-        lastLogin: nowIso,
-      })
-      .where(eq(staffTeachers.id, matchedStaff.id));
-  }
-
-  if (existingUser) {
-    const updated = await db
-      .update(users)
-      .set({
-        uid: existingUser.uid,
-        email: cleanEmail,
-        username: resolvedUsername,
-        phone: resolvedPhone,
-        passwordHash: nextHash,
-        name: resolvedName,
-        globalRole: 'school_user',
-        schoolId: resolvedSchoolId,
-        schoolRole: resolvedRole,
-        active: true,
-        lastLogin: new Date(),
-      })
-      .where(eq(users.id, existingUser.id))
-      .returning();
-    return toProfile(updated[0]);
-  }
-
-  const uid = matchedStaff
-    ? `local:${matchedStaff.id}`
-    : `registered:${resolvedSchoolId}:${cleanEmail}`;
-  const inserted = await db
-    .insert(users)
-    .values({
-      uid,
-      email: cleanEmail,
-      username: resolvedUsername,
-      phone: resolvedPhone,
-      passwordHash: nextHash,
-      name: resolvedName,
-      globalRole: 'school_user',
-      schoolId: resolvedSchoolId,
-      schoolRole: resolvedRole,
-      active: true,
-      lastLogin: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: users.uid,
-      set: {
-        passwordHash: nextHash,
-        name: resolvedName,
-        lastLogin: new Date(),
-      },
-    })
-    .returning();
-  return toProfile(inserted[0]);
 }
 
 export async function updateUserTenantRole(
@@ -706,7 +358,7 @@ export async function updateUserTenantRole(
       .returning();
 
     if (!updated[0]) return null;
-    return toProfile(updated[0]);
+    return toProfile(updated[0], null);
   } catch (error) {
     console.error('Database error updating user tenant role:', error);
     throw new Error('Failed to update active workspace role.', { cause: error });
@@ -750,25 +402,13 @@ function normalizePersonName(raw: string): string {
     .replace(/\s+/g, ' ');
 }
 
-export async function listRecoverySchools(): Promise<
-  Array<{ id: string; name: string; district: string }>
-> {
-  const rows = await db
-    .select({
-      id: schools.id,
-      name: schools.name,
-      district: schools.district,
-    })
-    .from(schools);
-  return rows.sort((a, b) => a.name.localeCompare(b.name));
-}
-
 export interface AccountLookupResult {
   recoveryToken: string;
   lookupMethod: RecoveryLookupMethod;
   maskedEmail: string;
   maskedPhone: string | null;
   maskedUsername: string | null;
+  maskedStaffId: string | null;
   schoolName: string;
   schoolContactPhone: string | null;
   schoolContactEmail: string | null;
@@ -778,16 +418,27 @@ export interface AccountLookupResult {
 
 export async function lookupRecoverableAccount(params: {
   identifier?: string;
-  schoolId?: string;
+  schoolCode?: string;
   fullName?: string;
 }): Promise<AccountLookupResult | null> {
   const identifier = params.identifier?.trim() ?? '';
-  const schoolId = params.schoolId?.trim() ?? '';
+  const schoolCode = params.schoolCode?.trim().toUpperCase() ?? '';
   const fullName = params.fullName?.trim() ?? '';
 
   let targetUser: typeof users.$inferSelect | null = null;
   let targetStaff: typeof staffTeachers.$inferSelect | null = null;
   let lookupMethod: RecoveryLookupMethod = 'identifier';
+
+  let scopedSchoolId: string | null = null;
+  if (schoolCode) {
+    const schRows = await db
+      .select({ id: schools.id })
+      .from(schools)
+      .where(sql`upper(trim(${schools.schoolCode})) = ${schoolCode}`)
+      .limit(1);
+    if (!schRows[0]) return null;
+    scopedSchoolId = schRows[0].id;
+  }
 
   if (identifier) {
     const clean = identifier.toLowerCase();
@@ -800,16 +451,17 @@ export async function lookupRecoverableAccount(params: {
           )
         : undefined;
 
+    const idPred = or(
+      sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${clean}`,
+      sql`lower(${users.email}) = ${clean}`,
+      sql`lower(COALESCE(${users.username}, '')) = ${clean}`,
+      ...(userPhonePred ? [userPhonePred] : [])
+    );
+
     const userRows = await db
       .select()
       .from(users)
-      .where(
-        or(
-          sql`lower(${users.email}) = ${clean}`,
-          sql`lower(${users.username}) = ${clean}`,
-          ...(userPhonePred ? [userPhonePred] : [])
-        )
-      )
+      .where(scopedSchoolId ? and(eq(users.schoolId, scopedSchoolId), idPred) : idPred)
       .limit(5);
 
     if (userRows.length > 0) {
@@ -822,28 +474,32 @@ export async function lookupRecoverableAccount(params: {
               phoneCandidates
             )
           : undefined;
+      const staffPred = or(
+        sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${clean}`,
+        sql`lower(${staffTeachers.email}) = ${clean}`,
+        sql`lower(${staffTeachers.username}) = ${clean}`,
+        ...(staffPhonePred ? [staffPhonePred] : [])
+      );
       const staffRows = await db
         .select()
         .from(staffTeachers)
         .where(
-          or(
-            sql`lower(${staffTeachers.email}) = ${clean}`,
-            sql`lower(${staffTeachers.username}) = ${clean}`,
-            ...(staffPhonePred ? [staffPhonePred] : [])
-          )
+          scopedSchoolId
+            ? and(eq(staffTeachers.schoolId, scopedSchoolId), staffPred)
+            : staffPred
         )
         .limit(5);
       if (staffRows.length > 0) {
         targetStaff = staffRows.find((s) => s.active) ?? staffRows[0];
       }
     }
-  } else if (schoolId && fullName) {
+  } else if (scopedSchoolId && fullName) {
     lookupMethod = 'name_school';
     const targetNormName = normalizePersonName(fullName);
     const schoolUsers = await db
       .select()
       .from(users)
-      .where(eq(users.schoolId, schoolId));
+      .where(eq(users.schoolId, scopedSchoolId));
     const matchedUsersByName = schoolUsers.filter(
       (u) => normalizePersonName(u.name) === targetNormName
     );
@@ -854,7 +510,7 @@ export async function lookupRecoverableAccount(params: {
       const schoolStaff = await db
         .select()
         .from(staffTeachers)
-        .where(eq(staffTeachers.schoolId, schoolId));
+        .where(eq(staffTeachers.schoolId, scopedSchoolId));
       const matchedStaffByName = schoolStaff.filter(
         (s) => normalizePersonName(s.name) === targetNormName
       );
@@ -870,6 +526,7 @@ export async function lookupRecoverableAccount(params: {
 
   const email = (targetUser?.email ?? targetStaff!.email).trim().toLowerCase();
   const username = targetUser?.username ?? targetStaff?.username ?? email.split('@')[0];
+  const staffCode = targetUser?.staffId ?? targetStaff?.staffId ?? null;
   const phone = normalizeStoredPhone(targetUser?.phone ?? targetStaff?.phone);
   const resolvedSchoolId = targetUser
     ? targetUser.globalRole === 'super_admin'
@@ -915,6 +572,7 @@ export async function lookupRecoverableAccount(params: {
     maskedEmail: maskEmail(email),
     maskedPhone: maskPhone(phone),
     maskedUsername: maskUsername(username),
+    maskedStaffId: staffCode,
     schoolName,
     schoolContactPhone,
     schoolContactEmail,
@@ -930,6 +588,8 @@ export async function verifyRecoveryIdentity(
   resetToken: string;
   account: {
     name: string;
+    staffId: string | null;
+    schoolCode: string | null;
     email: string;
     username: string;
     phone: string | null;
@@ -962,6 +622,7 @@ export async function verifyRecoveryIdentity(
   if (!userRow && !staffRow) return null;
 
   const name = (userRow?.name ?? staffRow!.name).trim();
+  const staffCode = userRow?.staffId ?? staffRow?.staffId ?? null;
   const email = (userRow?.email ?? staffRow!.email).trim().toLowerCase();
   const username = (userRow?.username ?? staffRow?.username ?? email.split('@')[0])
     .trim()
@@ -985,24 +646,29 @@ export async function verifyRecoveryIdentity(
     normalizePersonName(name) === normalizePersonName(answer);
   const matchesEmail = email === answerLower;
   const matchesUsername = username === answerLower;
+  const matchesStaffId = Boolean(staffCode && staffCode.toLowerCase() === answerLower);
   const matchesPhone = Boolean(
     phone &&
       (answerPhoneCandidates.includes(phone) ||
         (answerDigits.length === 4 && phoneDigits.endsWith(answerDigits)))
   );
 
-  if (!matchesName && !matchesEmail && !matchesUsername && !matchesPhone) {
+  if (!matchesName && !matchesEmail && !matchesUsername && !matchesStaffId && !matchesPhone) {
     return null;
   }
 
   let schoolName = 'SchuleFlow Platform (Global)';
+  let schoolCode: string | null = null;
   if (schoolId) {
     const schoolRows = await db
-      .select({ name: schools.name })
+      .select({ name: schools.name, schoolCode: schools.schoolCode })
       .from(schools)
       .where(eq(schools.id, schoolId))
       .limit(1);
-    if (schoolRows[0]) schoolName = schoolRows[0].name;
+    if (schoolRows[0]) {
+      schoolName = schoolRows[0].name;
+      schoolCode = schoolRows[0].schoolCode;
+    }
   }
 
   const resetToken = signRecoveryToken({
@@ -1018,6 +684,8 @@ export async function verifyRecoveryIdentity(
     resetToken,
     account: {
       name,
+      staffId: staffCode,
+      schoolCode,
       email,
       username,
       phone,
@@ -1067,7 +735,6 @@ export async function resetPasswordWithRecoveryToken(
       .where(eq(staffTeachers.id, payload.staffId));
   }
 
-  // Keep matching staff_teachers & users records synchronized for the account
   if (payload.schoolId) {
     await db
       .update(staffTeachers)
@@ -1085,7 +752,6 @@ export async function resetPasswordWithRecoveryToken(
       .where(sql`lower(${staffTeachers.email}) = ${cleanEmail}`);
   }
 
-  // Ensure a users row exists if the account originally existed only in staff_teachers
   if (!updatedUser && payload.staffId) {
     const staffRows = await db
       .select()
@@ -1098,6 +764,7 @@ export async function resetPasswordWithRecoveryToken(
         .insert(users)
         .values({
           uid: `local:${st.id}`,
+          staffId: st.staffId,
           email: cleanEmail,
           username: st.username.toLowerCase(),
           phone: normalizeStoredPhone(st.phone),

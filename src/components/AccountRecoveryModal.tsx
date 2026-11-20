@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   AlertCircle,
+  BadgeCheck,
   CheckCircle2,
   Eye,
   EyeOff,
@@ -19,8 +20,9 @@ import { platformApi } from '../utils/apiClient';
 interface AccountRecoveryModalProps {
   open: boolean;
   initialIdentifier?: string;
+  initialSchoolCode?: string;
   onClose: () => void;
-  onRecoveredSignInHint: (identifier: string) => void;
+  onRecoveredSignInHint: (identifier: string, schoolCode?: string | null) => void;
 }
 
 type RecoveryStep = 'locate' | 'verify' | 'result';
@@ -29,16 +31,14 @@ type LocateMode = 'identifier' | 'name_school';
 export function AccountRecoveryModal({
   open,
   initialIdentifier = '',
+  initialSchoolCode = '',
   onClose,
   onRecoveredSignInHint,
 }: AccountRecoveryModalProps) {
   const [step, setStep] = useState<RecoveryStep>('locate');
   const [locateMode, setLocateMode] = useState<LocateMode>('identifier');
   const [identifier, setIdentifier] = useState(initialIdentifier);
-  const [schoolsList, setSchoolsList] = useState<
-    Array<{ id: string; name: string; district: string }>
-  >([]);
-  const [selectedSchoolId, setSelectedSchoolId] = useState('');
+  const [schoolCodeInput, setSchoolCodeInput] = useState(initialSchoolCode);
   const [fullName, setFullName] = useState('');
 
   const [lookupData, setLookupData] = useState<{
@@ -47,6 +47,7 @@ export function AccountRecoveryModal({
     maskedEmail: string;
     maskedPhone: string | null;
     maskedUsername: string | null;
+    maskedStaffId: string | null;
     schoolName: string;
     schoolContactPhone: string | null;
     schoolContactEmail: string | null;
@@ -58,6 +59,8 @@ export function AccountRecoveryModal({
   const [resetToken, setResetToken] = useState('');
   const [recoveredAccount, setRecoveredAccount] = useState<{
     name: string;
+    staffId: string | null;
+    schoolCode: string | null;
     email: string;
     username: string;
     phone: string | null;
@@ -80,6 +83,7 @@ export function AccountRecoveryModal({
     setStep('locate');
     setLocateMode('identifier');
     setIdentifier(initialIdentifier);
+    setSchoolCodeInput(initialSchoolCode);
     setFullName('');
     setLookupData(null);
     setVerification('');
@@ -90,17 +94,7 @@ export function AccountRecoveryModal({
     setPasswordUpdated(false);
     setAdminHelpSent(false);
     setError(null);
-
-    platformApi
-      .recoverySchools()
-      .then((res) => {
-        setSchoolsList(res.schools);
-        if (res.schools[0]) {
-          setSelectedSchoolId((prev) => prev || res.schools[0].id);
-        }
-      })
-      .catch(() => undefined);
-  }, [open, initialIdentifier]);
+  }, [open, initialIdentifier, initialSchoolCode]);
 
   if (!open) return null;
 
@@ -109,10 +103,14 @@ export function AccountRecoveryModal({
     setError(null);
     setLoading(true);
     try {
+      const cleanCode = schoolCodeInput.trim().toUpperCase();
       const res = await platformApi.recoveryLookup(
         locateMode === 'identifier'
-          ? { identifier: identifier.trim() }
-          : { schoolId: selectedSchoolId, fullName: fullName.trim() }
+          ? {
+              identifier: identifier.trim(),
+              ...(cleanCode ? { schoolCode: cleanCode } : {}),
+            }
+          : { schoolCode: cleanCode, fullName: fullName.trim() }
       );
       setLookupData(res);
       setVerification('');
@@ -236,7 +234,7 @@ export function AccountRecoveryModal({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  By Email / Phone / Username
+                  By Staff ID / Email / Phone
                 </button>
                 <button
                   type="button"
@@ -250,52 +248,63 @@ export function AccountRecoveryModal({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  By Full Name &amp; School
+                  By Name &amp; School Code
                 </button>
               </div>
 
               {locateMode === 'identifier' ? (
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1.5">
-                    Remembered Email, Phone Number, or Username
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    disabled={loading}
-                    value={identifier}
-                    onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="e.g. name@school.ac.ug, 0772110401, or username"
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
-                  />
-                  <p className="mt-1.5 text-[11px] text-slate-500">
-                    Forgot your email too? Switch to <strong>By Full Name &amp; School</strong>{' '}
-                    above.
-                  </p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      School Code <span className="text-slate-400 font-normal">(optional)</span>
+                    </label>
+                    <input
+                      type="text"
+                      disabled={loading}
+                      value={schoolCodeInput}
+                      onChange={(e) => setSchoolCodeInput(e.target.value.toUpperCase())}
+                      placeholder="e.g. KHHS-101"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm uppercase text-slate-900 placeholder:normal-case placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-medium text-slate-700 mb-1">
+                      Staff ID, Email, Phone, or Username *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      disabled={loading}
+                      value={identifier}
+                      onChange={(e) => setIdentifier(e.target.value)}
+                      placeholder="e.g. KHHS-TCH-001, name@school.ac.ug, or 0772110401"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                    />
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      Forgot your Staff ID and email? Switch to{' '}
+                      <strong>By Name &amp; School Code</strong> above.
+                    </p>
+                  </div>
                 </div>
               ) : (
                 <div className="space-y-3">
                   <div>
                     <label className="block font-medium text-slate-700 mb-1">
-                      Select Your School
+                      School Code *
                     </label>
-                    <select
+                    <input
+                      type="text"
                       required
                       disabled={loading}
-                      value={selectedSchoolId}
-                      onChange={(e) => setSelectedSchoolId(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 focus:border-blue-800 focus:outline-none"
-                    >
-                      {schoolsList.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.district})
-                        </option>
-                      ))}
-                    </select>
+                      value={schoolCodeInput}
+                      onChange={(e) => setSchoolCodeInput(e.target.value.toUpperCase())}
+                      placeholder="e.g. KHHS-101"
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm uppercase text-slate-900 placeholder:normal-case placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                    />
                   </div>
                   <div>
                     <label className="block font-medium text-slate-700 mb-1">
-                      Your Registered Full Name
+                      Your Registered Full Name *
                     </label>
                     <input
                       type="text"
@@ -345,6 +354,7 @@ export function AccountRecoveryModal({
                   {lookupData.schoolName} · <strong>{lookupData.roleLabel}</strong>
                 </div>
                 <div className="grid grid-cols-1 gap-1 pt-1 font-mono text-[11px] text-slate-600">
+                  {lookupData.maskedStaffId && <div>Staff ID: {lookupData.maskedStaffId}</div>}
                   <div>Email: {lookupData.maskedEmail}</div>
                   {lookupData.maskedPhone && <div>Phone: {lookupData.maskedPhone}</div>}
                   {lookupData.maskedUsername && <div>Username: {lookupData.maskedUsername}</div>}
@@ -355,7 +365,7 @@ export function AccountRecoveryModal({
                 <label className="block font-medium text-slate-700 mb-1.5">
                   {lookupData.lookupMethod === 'identifier'
                     ? 'Confirm your Full Name (as registered) or your alternate Email / Phone'
-                    : 'Confirm your Registered Phone Number (or last 4 digits) or Email'}
+                    : 'Confirm your Registered Phone Number (or last 4 digits), Staff ID, or Email'}
                 </label>
                 <input
                   type="text"
@@ -366,7 +376,7 @@ export function AccountRecoveryModal({
                   placeholder={
                     lookupData.lookupMethod === 'identifier'
                       ? 'e.g. Sarah Nabwire or 0772110401'
-                      : 'e.g. 0772110401, last 4 digits, or email'
+                      : 'e.g. 0772110401, last 4 digits, Staff ID, or email'
                   }
                   className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 focus:border-blue-800 focus:outline-none"
                 />
@@ -442,8 +452,21 @@ export function AccountRecoveryModal({
                 <div className="text-slate-800 font-medium">
                   {recoveredAccount.name} · {recoveredAccount.roleLabel}
                 </div>
-                <div className="text-[11px] text-slate-600">{recoveredAccount.schoolName}</div>
+                <div className="text-[11px] text-slate-600">
+                  {recoveredAccount.schoolName}
+                  {recoveredAccount.schoolCode ? (
+                    <span className="ml-1.5 font-mono font-semibold text-slate-800">
+                      ({recoveredAccount.schoolCode})
+                    </span>
+                  ) : null}
+                </div>
                 <div className="pt-1 space-y-1 font-mono text-[11px] text-slate-900">
+                  {recoveredAccount.staffId && (
+                    <div className="flex items-center gap-1.5 font-semibold text-blue-950">
+                      <BadgeCheck className="h-3.5 w-3.5 text-blue-700" />
+                      <span>Staff ID: {recoveredAccount.staffId}</span>
+                    </div>
+                  )}
                   <div className="flex items-center gap-1.5">
                     <Mail className="h-3.5 w-3.5 text-slate-500" />
                     <span>Email: {recoveredAccount.email}</span>
@@ -465,7 +488,8 @@ export function AccountRecoveryModal({
                     <span>Password Updated Successfully</span>
                   </div>
                   <p className="text-[11px]">
-                    You can now sign in with your email or phone number and your new password.
+                    You can now sign in with your School Code, Staff ID or email, and your new
+                    password.
                   </p>
                 </div>
               ) : (
@@ -528,7 +552,10 @@ export function AccountRecoveryModal({
                 <button
                   type="button"
                   onClick={() => {
-                    onRecoveredSignInHint(recoveredAccount.email);
+                    onRecoveredSignInHint(
+                      recoveredAccount.staffId || recoveredAccount.email,
+                      recoveredAccount.schoolCode
+                    );
                     onClose();
                   }}
                   className="rounded-md bg-blue-900 px-4 py-2 font-semibold text-white hover:bg-blue-950"

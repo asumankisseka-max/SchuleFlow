@@ -38,6 +38,7 @@ export type WorkspaceTab =
 
 export interface UserAccount {
   id: string;
+  staffId?: string;
   name: string;
   email: string;
   username: string;
@@ -82,9 +83,9 @@ export interface SubjectCombination {
 
 export interface StreamClass {
   id: string;
-  name: string; // e.g., "S.2 East"
+  name: string; // e.g., "S.1" or "S.2 East"
   gradeLevel: string; // "S.1" .. "S.6"
-  stream: string; // "East", "West", "Science", "Arts"
+  stream?: string; // Optional stream e.g. "East", "West", "Science", "Arts"
   level: EducationLevel;
   classTeacherId: string;
   subjectIds: string[];
@@ -95,6 +96,7 @@ export type StudentStatus = 'active' | 'transferred' | 'inactive';
 
 export interface StudentProfile {
   id: string;
+  studentId?: string;
   admissionNo: string;
   fullName: string;
   gender: 'M' | 'F';
@@ -253,6 +255,7 @@ export interface SchoolSettings {
 
 export interface SchoolTenant {
   id: string;
+  schoolCode: string;
   name: string;
   subdomain: string;
   ministryRegNo?: string;
@@ -282,11 +285,13 @@ export interface SchoolTenant {
   reportsGeneratedCount: number;
   activeStudentCount?: number;
   staffCount?: number;
+  adminStaffId?: string;
   createdAt?: string;
 }
 
 export interface PublicSchoolBranding {
   id: string;
+  schoolCode: string;
   name: string;
   subdomain: string;
   district: string;
@@ -322,7 +327,10 @@ export interface SubscriptionInvoice {
 }
 
 export interface AuthSessionProfile {
+  userId?: number;
   uid: string;
+  staffId?: string;
+  schoolCode?: string | null;
   email: string;
   username?: string;
   phone?: string;

@@ -16,7 +16,6 @@ import {
   incrementTenantReportsGenerated,
   listAllSchoolsWithStats,
   listPlatformAuditLogs,
-  listPublicSchoolBranding,
   publishAllApprovedTenantMarksheets,
   recordAuditLog,
   updateSchoolSubscription,
@@ -36,15 +35,16 @@ import {
   type OnboardSchoolInput,
 } from './src/db/seed.ts';
 import {
+  AuthValidationError,
   authenticateWithCredentials,
-  listRecoverySchools,
   lookupRecoverableAccount,
-  registerAssignedStaffEmail,
+  lookupSchoolByCode,
   resetPasswordWithRecoveryToken,
   verifyRecoveryIdentity,
 } from './src/db/users.ts';
 import { signSessionToken, verifyRecoveryToken } from './src/lib/passwordAuth.ts';
 import {
+  SESSION_COOKIE_NAME,
   checkSchoolSubscriptionGate,
   requireAuth,
   requireRoles,
@@ -73,103 +73,23 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '10mb' }));
 
   /* ------------------------------------------------------------------------ */
-  /* Auth & Session Context Routes                                            */
+  /* Auth & Session Context Routes (Pure PostgreSQL + HttpOnly Cookie/Bearer) */
   /* ------------------------------------------------------------------------ */
-  app.get('/api/v1/auth/config', (_req, res) => {
-    const supabaseUrl =
-      process.env.SUPABASE_URL?.trim() ||
-      process.env.VITE_SUPABASE_URL?.trim() ||
-      null;
-    const supabaseAnonKey =
-      process.env.SUPABASE_ANON_KEY?.trim() ||
-      process.env.VITE_SUPABASE_ANON_KEY?.trim() ||
-      null;
-
-    res.json({
-      supabaseUrl: supabaseUrl && supabaseAnonKey ? supabaseUrl : null,
-      supabaseAnonKey: supabaseUrl && supabaseAnonKey ? supabaseAnonKey : null,
-    });
-  });
-
-  app.get('/api/v1/auth/schools-branding', async (_req, res) => {
+  app.get('/api/v1/auth/school-lookup', async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const schoolsList = await listPublicSchoolBranding();
-      res.json({ schools: schoolsList });
+      const rawCode = typeof req.query.code === 'string' ? req.query.code.trim() : '';
+      if (!rawCode) {
+        return res.status(400).json({ error: 'School Code is required.' });
+      }
+      const school = await lookupSchoolByCode(rawCode);
+      if (!school) {
+        return res.status(404).json({ error: 'No registered school matches that School Code.' });
+      }
+      res.json({ school });
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to load schools list.';
+      const message = error instanceof Error ? error.message : 'Failed to verify school code.';
       res.status(500).json({ error: message });
-    }
-  });
-
-  app.post('/api/v1/auth/register', async (req, res) => {
-    try {
-      await ensureInitialTenantsSeeded();
-
-      const { email, password, fullName } = req.body as {
-        email?: string;
-        password?: string;
-        fullName?: string;
-      };
-
-      if (!email?.trim() || !password) {
-        return res.status(400).json({
-          error: 'Email address and password are required.',
-        });
-      }
-
-      const dbUser = await registerAssignedStaffEmail(email, password, fullName);
-
-      if (dbUser.globalRole !== 'super_admin') {
-        const gate = await checkSchoolSubscriptionGate(dbUser.schoolId);
-        if (!gate.allowed && !gate.expired) {
-          return res.status(403).json({
-            error: gate.reason || 'School subscription is suspended.',
-          });
-        }
-      }
-
-      const token = signSessionToken({
-        uid: dbUser.uid,
-        email: dbUser.email,
-        name: dbUser.name,
-        globalRole: dbUser.globalRole,
-        schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
-        schoolRole: dbUser.schoolRole,
-      });
-
-      const allSchools = await listAllSchoolsWithStats();
-      const accessibleSchools =
-        dbUser.globalRole === 'super_admin'
-          ? allSchools
-          : allSchools.filter((s) => s.id === dbUser.schoolId);
-
-      await recordAuditLog({
-        userId: dbUser.uid,
-        userEmail: dbUser.email,
-        userRole: dbUser.globalRole === 'super_admin' ? 'super_admin' : dbUser.schoolRole,
-        schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
-        action: 'USER_REGISTERED',
-        details: `${dbUser.name} activated institutional email login (${dbUser.email}).`,
-      });
-
-      res.json({
-        token,
-        user: dbUser,
-        schools: accessibleSchools,
-      });
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Registration failed.';
-      const lower = message.toLowerCase();
-      const status =
-        lower.includes('already exists') || lower.includes('already registered')
-          ? 409
-          : lower.includes('deactivated') || lower.includes('not assigned')
-            ? 403
-            : lower.includes('valid email') || lower.includes('at least 6') || lower.includes('required')
-              ? 400
-              : 500;
-      res.status(status).json({ error: message });
     }
   });
 
@@ -177,22 +97,43 @@ app.use(express.json({ limit: '10mb' }));
     try {
       await ensureInitialTenantsSeeded();
 
-      const { identifier, password, schoolId } = req.body as {
+      const { schoolCode, identifier, password, mode } = req.body as {
+        schoolCode?: string;
         identifier?: string;
         password?: string;
-        schoolId?: string;
+        mode?: 'school' | 'super_admin';
       };
 
-      if (!identifier?.trim() || !password) {
+      const resolvedMode: 'school' | 'super_admin' = mode === 'super_admin' ? 'super_admin' : 'school';
+
+      if (resolvedMode === 'school' && !schoolCode?.trim()) {
         return res.status(400).json({
-          error: 'Email, phone number, or username and password are required.',
+          error: 'School Code is required for school staff login.',
         });
       }
 
-      const dbUser = await authenticateWithCredentials(identifier, password, schoolId);
+      if (!identifier?.trim() || !password) {
+        return res.status(400).json({
+          error:
+            resolvedMode === 'super_admin'
+              ? 'Super Admin email and password are required.'
+              : 'Staff ID or email and password are required.',
+        });
+      }
+
+      const dbUser = await authenticateWithCredentials({
+        schoolCode,
+        identifier,
+        password,
+        mode: resolvedMode,
+      });
+
       if (!dbUser) {
         return res.status(401).json({
-          error: 'Invalid email, phone number, or password.',
+          error:
+            resolvedMode === 'super_admin'
+              ? 'Invalid Platform Super Admin email or password.'
+              : 'Invalid Staff ID / email or personal password for this school.',
         });
       }
 
@@ -215,12 +156,23 @@ app.use(express.json({ limit: '10mb' }));
       }
 
       const token = signSessionToken({
+        userId: dbUser.userId,
         uid: dbUser.uid,
+        staffId: dbUser.staffId,
         email: dbUser.email,
         name: dbUser.name,
         globalRole: dbUser.globalRole,
         schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
+        role: dbUser.schoolRole,
         schoolRole: dbUser.schoolRole,
+      });
+
+      res.cookie(SESSION_COOKIE_NAME, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
       const allSchools = await listAllSchoolsWithStats();
@@ -235,7 +187,7 @@ app.use(express.json({ limit: '10mb' }));
         userRole: dbUser.globalRole === 'super_admin' ? 'super_admin' : dbUser.schoolRole,
         schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
         action: 'USER_LOGIN',
-        details: `${dbUser.name} signed in via credentials (${dbUser.globalRole === 'super_admin' ? 'Platform Super Admin' : dbUser.schoolRole}).`,
+        details: `${dbUser.name}${dbUser.staffId ? ` (${dbUser.staffId})` : ''} signed in (${dbUser.globalRole === 'super_admin' ? 'Platform Super Admin' : dbUser.schoolRole}).`,
       });
 
       res.json({
@@ -244,10 +196,18 @@ app.use(express.json({ limit: '10mb' }));
         schools: accessibleSchools,
       });
     } catch (error: unknown) {
+      if (error instanceof AuthValidationError) {
+        return res.status(error.status).json({ error: error.message });
+      }
       const message = error instanceof Error ? error.message : 'Login failed.';
       const status = message.includes('deactivated') ? 403 : 500;
       res.status(status).json({ error: message });
     }
+  });
+
+  app.post('/api/v1/auth/logout', (_req, res) => {
+    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+    res.json({ ok: true });
   });
 
   app.post('/api/v1/auth/sync', requireAuth, async (req: AuthRequest, res) => {
@@ -278,33 +238,23 @@ app.use(express.json({ limit: '10mb' }));
     }
   });
 
-  app.get('/api/v1/auth/recover/schools', async (_req, res) => {
-    try {
-      await ensureInitialTenantsSeeded();
-      const schoolsList = await listRecoverySchools();
-      res.json({ schools: schoolsList });
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : 'Failed to load schools list.';
-      res.status(500).json({ error: message });
-    }
-  });
-
   app.post('/api/v1/auth/recover/lookup', async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const { identifier, schoolId, fullName } = req.body as {
+      const { identifier, schoolCode, fullName } = req.body as {
         identifier?: string;
-        schoolId?: string;
+        schoolCode?: string;
         fullName?: string;
       };
 
-      if (!identifier?.trim() && !(schoolId?.trim() && fullName?.trim())) {
+      if (!identifier?.trim() && !(schoolCode?.trim() && fullName?.trim())) {
         return res.status(400).json({
-          error: 'Enter your email, phone number, or username — or select your school and enter your full name.',
+          error:
+            'Enter your Staff ID, email, or phone — or enter your School Code and full name.',
         });
       }
 
-      const found = await lookupRecoverableAccount({ identifier, schoolId, fullName });
+      const found = await lookupRecoverableAccount({ identifier, schoolCode, fullName });
       if (!found) {
         return res.status(404).json({
           error: 'No matching account was found. Double-check your details or contact your School Administrator.',
@@ -802,16 +752,16 @@ app.use(express.json({ limit: '10mb' }));
     async (req: AuthRequest, res) => {
       try {
         const staff = req.body as UserAccount;
-        await upsertTenantStaffMember(req.schoolId!, staff);
+        const saved = await upsertTenantStaffMember(req.schoolId!, staff);
         await recordAuditLog({
           userId: req.dbUser!.uid,
           userEmail: req.dbUser!.email,
           userRole: req.dbUser!.schoolRole,
           schoolId: req.schoolId!,
           action: 'STAFF_ACCOUNT_SAVED',
-          details: `Saved staff user ${staff.email} (${staff.role}) within ${req.school?.name ?? req.schoolId}.`,
+          details: `Saved staff user ${saved.email} (${saved.staffId ?? saved.id}, ${saved.role}) within ${req.school?.name ?? req.schoolId}.`,
         });
-        res.json({ staff: { ...staff, password: '********' } });
+        res.json({ staff: saved });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to save staff account.';
         res.status(500).json({ error: message });
@@ -918,8 +868,12 @@ app.use(express.json({ limit: '10mb' }));
     }
   );
 
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
 /* ------------------------------------------------------------------------ */
-/* Server Startup (Local Dev & Cloud Run — Skipped on Vercel Import)        */
+/* Server Startup (Local Dev & Cloud Run — Skipped on Netlify / Vercel)     */
 /* ------------------------------------------------------------------------ */
 function resolveRealPath(target: string): string {
   try {
@@ -937,13 +891,14 @@ const entryFilePath = process.argv[1] ? resolveRealPath(process.argv[1]) : '';
 const isDirectExecution = Boolean(
   currentFilePath && entryFilePath && currentFilePath === entryFilePath
 );
+const isServerlessRuntime = Boolean(process.env.NETLIFY || process.env.VERCEL);
 
 async function startServer() {
-  if (process.env.VERCEL || !isDirectExecution) {
+  if (isServerlessRuntime || !isDirectExecution) {
     return;
   }
 
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
     const vitePkg = 'vite';
     const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
@@ -965,7 +920,7 @@ async function startServer() {
   });
 }
 
-if (!process.env.VERCEL && isDirectExecution) {
+if (!isServerlessRuntime && isDirectExecution) {
   startServer().catch((err) => {
     console.error('Fatal server startup error:', err);
     process.exit(1);

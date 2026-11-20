@@ -1,5 +1,5 @@
 import type { NextFunction, Response } from 'express';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, or, sql } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { schools, staffTeachers } from '../db/schema.ts';
 import type {
@@ -26,27 +26,28 @@ export function requireTenantScopeWithOptions(options: { allowExpired?: boolean 
       });
     }
 
+    const tokenUser = req.user;
     const dbUser = req.dbUser;
-    if (!dbUser) {
+    if (!tokenUser || !dbUser) {
       return res.status(401).json({ error: 'Unauthorized: User session not loaded.' });
     }
 
     // Strict Platform Super Admin Isolation: super_admin has school_id = null and cannot access internal school data
-    if (dbUser.globalRole === 'super_admin') {
+    if (dbUser.globalRole === 'super_admin' || tokenUser.globalRole === 'super_admin') {
       return res.status(403).json({
         error:
           'Platform Super Admins cannot inspect or modify internal school academic records.',
       });
     }
 
-    // Strict Tenant Isolation Guard: school users may only access their assigned school
-    if (!dbUser.schoolId) {
+    // Strict Tenant Isolation Guard using verified token's schoolId and DB user's schoolId
+    if (!tokenUser.schoolId || !dbUser.schoolId) {
       return res.status(403).json({
         error: 'Account not assigned to an active school workspace. Contact your School Administrator.',
       });
     }
 
-    if (dbUser.schoolId !== requestedSchoolId) {
+    if (tokenUser.schoolId !== requestedSchoolId || dbUser.schoolId !== requestedSchoolId) {
       return res.status(403).json({
         error: 'You are not authorized to access records for another school.',
       });
@@ -60,7 +61,12 @@ export function requireTenantScopeWithOptions(options: { allowExpired?: boolean 
         .where(
           and(
             eq(staffTeachers.schoolId, requestedSchoolId),
-            sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+            or(
+              dbUser.staffId
+                ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${dbUser.staffId.toLowerCase()}`
+                : sql`false`,
+              sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+            )
           )
         )
         .limit(1);
@@ -92,6 +98,7 @@ export function requireTenantScopeWithOptions(options: { allowExpired?: boolean 
 
       const school: SchoolTenant = {
         id: row.id,
+        schoolCode: row.schoolCode,
         name: row.name,
         subdomain: row.subdomain,
         ministryRegNo: row.ministryRegNo,

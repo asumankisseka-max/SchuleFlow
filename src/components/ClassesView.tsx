@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Layers, Plus, Trash2, Users } from 'lucide-react';
 import type {
   CurriculumScope,
@@ -66,13 +66,42 @@ export function ClassesView({
 
   const [selectedClassId, setSelectedClassId] = useState(visibleClasses[0]?.id ?? '');
   const activeClass = visibleClasses.find((c) => c.id === selectedClassId) ?? visibleClasses[0];
+  const [streamDraft, setStreamDraft] = useState(activeClass?.stream ?? '');
+
+  useEffect(() => {
+    setStreamDraft(activeClass?.stream ?? '');
+  }, [activeClass?.id, activeClass?.stream]);
+
+  const commitActiveClassStream = () => {
+    if (!activeClass || !canEdit) return;
+    const trimmed = streamDraft.trim();
+    const current = (activeClass.stream ?? '').trim();
+    if (trimmed === current) {
+      setStreamDraft(current);
+      return;
+    }
+    const nextName = trimmed ? `${activeClass.gradeLevel} ${trimmed}` : activeClass.gradeLevel;
+    const duplicate = classes.find(
+      (c) => c.id !== activeClass.id && c.name.trim().toLowerCase() === nextName.toLowerCase()
+    );
+    if (duplicate) {
+      setStreamDraft(current);
+      return;
+    }
+    onUpdateClass({
+      ...activeClass,
+      stream: trimmed || undefined,
+      name: nextName,
+    });
+  };
 
   // New class form
   const [showNewClass, setShowNewClass] = useState(false);
   const [gradeLevel, setGradeLevel] = useState(allowedGrades[0] ?? 'S.1');
-  const [stream, setStream] = useState('North');
+  const [stream, setStream] = useState('');
   const [level, setLevel] = useState<EducationLevel>(allowOlevel ? 'olevel' : 'alevel');
   const [classTeacherId, setClassTeacherId] = useState(teachers[0]?.id ?? '');
+  const [classFormError, setClassFormError] = useState<string | null>(null);
 
   // New A'Level combination form
   const [showNewCombo, setShowNewCombo] = useState(false);
@@ -83,6 +112,19 @@ export function ClassesView({
 
   const handleCreateClass = (e: React.FormEvent) => {
     e.preventDefault();
+    setClassFormError(null);
+    const cleanStream = stream.trim();
+    const className = cleanStream ? `${gradeLevel} ${cleanStream}` : gradeLevel;
+    const duplicate = classes.find(
+      (c) => c.name.trim().toLowerCase() === className.toLowerCase()
+    );
+    if (duplicate) {
+      setClassFormError(
+        `Class "${className}" already exists. Enter a stream name or choose another class level.`
+      );
+      return;
+    }
+
     const defaultSubs = subjects
       .filter((s) => s.level === level)
       .slice(0, level === 'olevel' ? 6 : 5)
@@ -93,9 +135,9 @@ export function ClassesView({
     });
     const newCls: StreamClass = {
       id: `cls-${Date.now()}`,
-      name: `${gradeLevel} ${stream.trim()}`.trim(),
+      name: className,
       gradeLevel,
-      stream: stream.trim() || 'A',
+      stream: cleanStream || undefined,
       level,
       classTeacherId: classTeacherId || teachers[0]?.id || '',
       subjectIds: defaultSubs,
@@ -103,6 +145,7 @@ export function ClassesView({
     };
     onAddClass(newCls);
     setSelectedClassId(newCls.id);
+    setStream('');
     setShowNewClass(false);
   };
 
@@ -158,21 +201,24 @@ export function ClassesView({
       <div className="rounded-lg border border-slate-200 bg-white p-4 flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-lg font-bold text-slate-900">
-            {allowAlevel ? "Classes, Streams & A'Level Combinations" : 'Classes & Streams'}
+            {allowAlevel ? "Classes & A'Level Combinations" : 'Classes'}
           </h2>
           <p className="text-xs text-slate-500">
-            Configure {allowedGrades[0]}–{allowedGrades[allowedGrades.length - 1]} streams, class
+            Configure {allowedGrades[0]}–{allowedGrades[allowedGrades.length - 1]} classes (streams optional), class
             teachers, subject offerings, and subject teacher assignments
           </p>
         </div>
         {canEdit && (
           <button
             type="button"
-            onClick={() => setShowNewClass((v) => !v)}
+            onClick={() => {
+              setClassFormError(null);
+              setShowNewClass((v) => !v);
+            }}
             className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
           >
             <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Add Class / Stream</span>
+            <span>Add Class</span>
           </button>
         )}
       </div>
@@ -180,76 +226,89 @@ export function ClassesView({
       {showNewClass && canEdit && (
         <form
           onSubmit={handleCreateClass}
-          className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 grid grid-cols-1 sm:grid-cols-5 gap-3 items-end text-xs"
+          className="rounded-lg border border-blue-200 bg-blue-50/40 p-4 space-y-3 text-xs"
         >
-          <div>
-            <label className="block font-medium text-slate-700 mb-1">Class Level</label>
-            <select
-              value={gradeLevel}
-              onChange={(e) => {
-                const g = e.target.value;
-                setGradeLevel(g);
-                setLevel(g === 'S.5' || g === 'S.6' ? 'alevel' : 'olevel');
-              }}
-              className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
-            >
-              {allowedGrades.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block font-medium text-slate-700 mb-1">Stream Name</label>
-            <input
-              type="text"
-              required
-              value={stream}
-              onChange={(e) => setStream(e.target.value)}
-              placeholder="East / West / Science"
-              className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
-            />
-          </div>
-          <div>
-            <label className="block font-medium text-slate-700 mb-1">Curriculum Level</label>
-            <select
-              value={level}
-              onChange={(e) => setLevel(e.target.value as EducationLevel)}
-              className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
-            >
-              {allowOlevel && <option value="olevel">O&apos;Level (CBC)</option>}
-              {allowAlevel && <option value="alevel">A&apos;Level (UACE)</option>}
-            </select>
-          </div>
-          <div>
-            <label className="block font-medium text-slate-700 mb-1">Class Teacher</label>
-            <select
-              value={classTeacherId}
-              onChange={(e) => setClassTeacherId(e.target.value)}
-              className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
-            >
-              {teachers.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="submit"
-              className="flex-1 rounded bg-blue-900 px-3 py-1.5 font-medium text-white hover:bg-blue-950"
-            >
-              Create
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowNewClass(false)}
-              className="rounded border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700"
-            >
-              Cancel
-            </button>
+          {classFormError && (
+            <div className="rounded border border-red-200 bg-red-50 px-3 py-2 text-red-800">
+              {classFormError}
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-5 gap-3 items-end">
+            <div>
+              <label className="block font-medium text-slate-700 mb-1">Class Level</label>
+              <select
+                value={gradeLevel}
+                onChange={(e) => {
+                  const g = e.target.value;
+                  setGradeLevel(g);
+                  setLevel(g === 'S.5' || g === 'S.6' ? 'alevel' : 'olevel');
+                  setClassFormError(null);
+                }}
+                className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
+              >
+                {allowedGrades.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block font-medium text-slate-700 mb-1">Stream (Optional)</label>
+              <input
+                type="text"
+                value={stream}
+                onChange={(e) => {
+                  setStream(e.target.value);
+                  setClassFormError(null);
+                }}
+                placeholder="Optional (e.g. East, West)"
+                className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
+              />
+            </div>
+            <div>
+              <label className="block font-medium text-slate-700 mb-1">Curriculum Level</label>
+              <select
+                value={level}
+                onChange={(e) => setLevel(e.target.value as EducationLevel)}
+                className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
+              >
+                {allowOlevel && <option value="olevel">O&apos;Level (CBC)</option>}
+                {allowAlevel && <option value="alevel">A&apos;Level (UACE)</option>}
+              </select>
+            </div>
+            <div>
+              <label className="block font-medium text-slate-700 mb-1">Class Teacher</label>
+              <select
+                value={classTeacherId}
+                onChange={(e) => setClassTeacherId(e.target.value)}
+                className="w-full rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900"
+              >
+                {teachers.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                className="flex-1 rounded bg-blue-900 px-3 py-1.5 font-medium text-white hover:bg-blue-950"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowNewClass(false);
+                  setClassFormError(null);
+                }}
+                className="rounded border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         </form>
       )}
@@ -303,22 +362,42 @@ export function ClassesView({
                     : "Upper Secondary A'Level Principal & Subsidiary Papers"}
                 </p>
               </div>
-              <div className="text-xs">
-                <label className="block text-slate-500 mb-1">Class Teacher</label>
-                <select
-                  disabled={!canEdit}
-                  value={activeClass.classTeacherId}
-                  onChange={(e) =>
-                    onUpdateClass({ ...activeClass, classTeacherId: e.target.value })
-                  }
-                  className="rounded border border-slate-300 bg-white px-2.5 py-1.5 font-medium text-slate-900 disabled:bg-slate-50"
-                >
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <div>
+                  <label className="block text-slate-500 mb-1">Stream (Optional)</label>
+                  <input
+                    type="text"
+                    disabled={!canEdit}
+                    value={streamDraft}
+                    placeholder="None"
+                    onChange={(e) => setStreamDraft(e.target.value)}
+                    onBlur={commitActiveClassStream}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        (e.currentTarget as HTMLInputElement).blur();
+                      }
+                    }}
+                    className="w-36 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-slate-900 disabled:bg-slate-50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 mb-1">Class Teacher</label>
+                  <select
+                    disabled={!canEdit}
+                    value={activeClass.classTeacherId}
+                    onChange={(e) =>
+                      onUpdateClass({ ...activeClass, classTeacherId: e.target.value })
+                    }
+                    className="rounded border border-slate-300 bg-white px-2.5 py-1.5 font-medium text-slate-900 disabled:bg-slate-50"
+                  >
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </div>
 

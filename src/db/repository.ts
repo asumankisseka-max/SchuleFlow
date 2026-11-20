@@ -13,7 +13,6 @@ import type {
   CurriculumScope,
   ExaminationPeriod,
   MarksheetRecord,
-  PublicSchoolBranding,
   SchoolDatabase,
   SchoolSettings,
   SchoolStatus,
@@ -28,6 +27,11 @@ import type {
   UserAccount,
   UserRole,
 } from '../types.ts';
+import {
+  extractSchoolInitials,
+  generateNextStaffId,
+  generateNextStudentId,
+} from '../utils/idGenerator.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 import {
   DEFAULT_UNIFORM_PRIMARY,
@@ -95,6 +99,7 @@ export async function listAllSchoolsWithStats(): Promise<SchoolTenant[]> {
 
     return schoolRows.map((row) => ({
       id: row.id,
+      schoolCode: row.schoolCode,
       name: row.name,
       subdomain: row.subdomain,
       ministryRegNo: row.ministryRegNo,
@@ -129,37 +134,6 @@ export async function listAllSchoolsWithStats(): Promise<SchoolTenant[]> {
   } catch (error) {
     console.error('Failed to list schools:', error);
     throw new Error('Could not load registered schools.', { cause: error });
-  }
-}
-
-export async function listPublicSchoolBranding(): Promise<PublicSchoolBranding[]> {
-  try {
-    const rows = await db
-      .select({
-        id: schools.id,
-        name: schools.name,
-        subdomain: schools.subdomain,
-        district: schools.district,
-        logoUrl: schools.logoUrl,
-        primaryColor: schools.primaryColor,
-        secondaryColor: schools.secondaryColor,
-      })
-      .from(schools);
-
-    return rows
-      .map((row) => ({
-        id: row.id,
-        name: row.name,
-        subdomain: row.subdomain,
-        district: row.district,
-        logoUrl: row.logoUrl,
-        primaryColor: row.primaryColor || DEFAULT_UNIFORM_PRIMARY,
-        secondaryColor: row.secondaryColor || DEFAULT_UNIFORM_SECONDARY,
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
-  } catch (error) {
-    console.error('Failed to list public school branding:', error);
-    throw new Error('Could not load school branding list.', { cause: error });
   }
 }
 
@@ -442,6 +416,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
 
       const usersList: UserAccount[] = staffRows.map((u) => ({
         id: u.id,
+        staffId: u.staffId ?? undefined,
         name: u.name,
         email: u.email,
         username: u.username,
@@ -485,7 +460,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           id: c.id,
           name: c.name,
           gradeLevel: c.gradeLevel,
-          stream: c.stream,
+          stream: c.stream || undefined,
           level: c.level as StreamClass['level'],
           classTeacherId: c.classTeacherId,
           subjectIds: c.subjectIds,
@@ -493,6 +468,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
         })),
         students: studentRows.map((stu) => ({
           id: stu.id,
+          studentId: stu.studentId ?? undefined,
           admissionNo: stu.admissionNo,
           fullName: stu.fullName,
           gender: stu.gender as 'M' | 'F',
@@ -588,10 +564,39 @@ export async function addStudentsWithQuotaCheck(
 
       if (newStudents.length === 0) return [];
 
+      const existingStudentIdRows = await tx
+        .select({ studentId: students.studentId })
+        .from(students)
+        .where(eq(students.schoolId, schoolId));
+
+      const initials = extractSchoolInitials(school.name);
+      const usedStudentIds = existingStudentIdRows
+        .map((r) => r.studentId)
+        .filter((v): v is string => Boolean(v && v.trim()));
+      const usedSet = new Set(usedStudentIds.map((id) => id.toUpperCase()));
+
+      const preparedStudents: StudentProfile[] = newStudents.map((stu) => {
+        const providedId = stu.studentId?.trim().toUpperCase();
+        const generatedStudentId =
+          providedId && !usedSet.has(providedId)
+            ? providedId
+            : generateNextStudentId(initials, usedStudentIds, true);
+        usedStudentIds.push(generatedStudentId);
+        usedSet.add(generatedStudentId.toUpperCase());
+        const resolvedAdmissionNo = stu.admissionNo?.trim() || generatedStudentId;
+
+        return {
+          ...stu,
+          studentId: generatedStudentId,
+          admissionNo: resolvedAdmissionNo,
+        };
+      });
+
       await tx.insert(students).values(
-        newStudents.map((stu) => ({
+        preparedStudents.map((stu) => ({
           id: stu.id,
           schoolId,
+          studentId: stu.studentId!,
           admissionNo: stu.admissionNo,
           fullName: stu.fullName,
           gender: stu.gender,
@@ -606,7 +611,7 @@ export async function addStudentsWithQuotaCheck(
         }))
       );
 
-      return newStudents;
+      return preparedStudents;
     });
   } catch (error) {
     console.error('Failed to add students:', error);
@@ -623,6 +628,7 @@ export async function updateTenantStudent(schoolId: string, stu: StudentProfile)
       await tx
         .update(students)
         .set({
+          ...(stu.studentId ? { studentId: stu.studentId.trim().toUpperCase() } : {}),
           admissionNo: stu.admissionNo,
           fullName: stu.fullName,
           gender: stu.gender,
@@ -665,15 +671,18 @@ export async function bulkPromoteTenantStudents(
 
 export async function upsertTenantClass(schoolId: string, cls: StreamClass, attachToExamId?: string) {
   try {
+    const cleanStream = (cls.stream ?? '').trim();
+    const cleanName =
+      cls.name.trim() || (cleanStream ? `${cls.gradeLevel} ${cleanStream}` : cls.gradeLevel);
     await withTenantScope(schoolId, async (tx) => {
       await tx
         .insert(classesStreams)
         .values({
           id: cls.id,
           schoolId,
-          name: cls.name,
+          name: cleanName,
           gradeLevel: cls.gradeLevel,
-          stream: cls.stream,
+          stream: cleanStream,
           level: cls.level,
           classTeacherId: cls.classTeacherId,
           subjectIds: cls.subjectIds,
@@ -682,9 +691,9 @@ export async function upsertTenantClass(schoolId: string, cls: StreamClass, atta
         .onConflictDoUpdate({
           target: classesStreams.id,
           set: {
-            name: cls.name,
+            name: cleanName,
             gradeLevel: cls.gradeLevel,
-            stream: cls.stream,
+            stream: cleanStream,
             level: cls.level,
             classTeacherId: cls.classTeacherId,
             subjectIds: cls.subjectIds,
@@ -1073,7 +1082,10 @@ export async function updateTenantSettingsAndGrading(
   }
 }
 
-export async function upsertTenantStaffMember(schoolId: string, staff: UserAccount) {
+export async function upsertTenantStaffMember(
+  schoolId: string,
+  staff: UserAccount
+): Promise<UserAccount> {
   try {
     const cleanEmail = staff.email.trim().toLowerCase();
     const cleanUsername = staff.username.trim().toLowerCase() || cleanEmail.split('@')[0];
@@ -1089,7 +1101,14 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
     );
     const computedHash = hasNewPassword ? hashPassword(staff.password.trim()) : undefined;
 
-    await withTenantScope(schoolId, async (tx) => {
+    return await withTenantScope(schoolId, async (tx) => {
+      const [schoolRow] = await tx
+        .select({ name: schools.name })
+        .from(schools)
+        .where(eq(schools.id, schoolId))
+        .limit(1);
+      const initials = extractSchoolInitials(schoolRow?.name ?? 'School');
+
       const existingStaffRows = await tx
         .select()
         .from(staffTeachers)
@@ -1106,11 +1125,30 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
 
       const scopedId = existingStaffRows[0]?.id ?? (rawId.includes(':') ? rawId : prefixedId);
 
+      let assignedStaffId = existingStaffRows[0]?.staffId?.trim() || staff.staffId?.trim() || null;
+      if (!assignedStaffId) {
+        const [allStaffIds, allUserStaffIds] = await Promise.all([
+          tx
+            .select({ staffId: staffTeachers.staffId })
+            .from(staffTeachers)
+            .where(eq(staffTeachers.schoolId, schoolId)),
+          tx
+            .select({ staffId: users.staffId })
+            .from(users)
+            .where(eq(users.schoolId, schoolId)),
+        ]);
+        const usedIds = [...allStaffIds, ...allUserStaffIds]
+          .map((r) => r.staffId)
+          .filter((v): v is string => Boolean(v && v.trim()));
+        assignedStaffId = generateNextStaffId(initials, usedIds, true);
+      }
+
       await tx
         .insert(staffTeachers)
         .values({
           id: scopedId,
           schoolId,
+          staffId: assignedStaffId,
           name: staff.name.trim(),
           email: cleanEmail,
           username: cleanUsername,
@@ -1125,6 +1163,7 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
         .onConflictDoUpdate({
           target: staffTeachers.id,
           set: {
+            staffId: assignedStaffId,
             name: staff.name.trim(),
             email: cleanEmail,
             username: cleanUsername,
@@ -1152,6 +1191,7 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
         await tx
           .update(users)
           .set({
+            staffId: assignedStaffId,
             name: staff.name.trim(),
             email: cleanEmail,
             username: cleanUsername,
@@ -1167,6 +1207,7 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
           .insert(users)
           .values({
             uid: `local:${scopedId}`,
+            staffId: assignedStaffId,
             email: cleanEmail,
             username: cleanUsername,
             phone: normalizedPhone,
@@ -1180,6 +1221,7 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
           .onConflictDoUpdate({
             target: users.uid,
             set: {
+              staffId: assignedStaffId,
               email: cleanEmail,
               username: cleanUsername,
               phone: normalizedPhone,
@@ -1191,6 +1233,17 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
             },
           });
       }
+
+      return {
+        ...staff,
+        id: scopedId,
+        staffId: assignedStaffId,
+        email: cleanEmail,
+        username: cleanUsername,
+        role: normalizedRole,
+        phone: normalizedPhone ?? undefined,
+        password: '********',
+      };
     });
   } catch (error) {
     console.error('Failed to save staff member:', error);
@@ -1198,13 +1251,38 @@ export async function upsertTenantStaffMember(schoolId: string, staff: UserAccou
   }
 }
 
-export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAccount[]) {
+export async function bulkUpsertTenantStaff(
+  schoolId: string,
+  staffList: UserAccount[]
+): Promise<UserAccount[]> {
   if (staffList.length === 0) return [];
   try {
-    await withTenantScope(schoolId, async (tx) => {
+    return await withTenantScope(schoolId, async (tx) => {
+      const [schoolRow, allStaffIds, allUserStaffIds] = await Promise.all([
+        tx.select({ name: schools.name }).from(schools).where(eq(schools.id, schoolId)).limit(1),
+        tx
+          .select({ id: staffTeachers.id, email: staffTeachers.email, staffId: staffTeachers.staffId })
+          .from(staffTeachers)
+          .where(eq(staffTeachers.schoolId, schoolId)),
+        tx.select({ staffId: users.staffId }).from(users).where(eq(users.schoolId, schoolId)),
+      ]);
+
+      const initials = extractSchoolInitials(schoolRow[0]?.name ?? 'School');
+      const existingByEmail = new Map(
+        allStaffIds.map((r) => [r.email.trim().toLowerCase(), r])
+      );
+      const usedIds = [...allStaffIds, ...allUserStaffIds]
+        .map((r) => r.staffId)
+        .filter((v): v is string => Boolean(v && v.trim()));
+      const usedSet = new Set(usedIds.map((id) => id.toUpperCase()));
+
+      const savedResults: UserAccount[] = [];
+
       for (const staff of staffList) {
-        const scopedId = staff.id.includes(':') ? staff.id : `${schoolId}:${staff.id}`;
         const cleanEmail = staff.email.trim().toLowerCase();
+        const existingMatch = existingByEmail.get(cleanEmail);
+        const scopedId =
+          existingMatch?.id ?? (staff.id.includes(':') ? staff.id : `${schoolId}:${staff.id}`);
         const cleanUsername = staff.username.trim().toLowerCase() || cleanEmail.split('@')[0];
         const normalizedRole = normalizeUserRole(staff.role);
         const normalizedPhone = normalizeStoredPhone(staff.phone);
@@ -1213,11 +1291,19 @@ export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAcc
             ? hashPassword(staff.password)
             : hashPassword('SchuleFlow2026!');
 
+        let assignedStaffId = existingMatch?.staffId?.trim() || staff.staffId?.trim() || null;
+        if (!assignedStaffId || (!existingMatch && usedSet.has(assignedStaffId.toUpperCase()))) {
+          assignedStaffId = generateNextStaffId(initials, usedIds, true);
+        }
+        usedIds.push(assignedStaffId);
+        usedSet.add(assignedStaffId.toUpperCase());
+
         await tx
           .insert(staffTeachers)
           .values({
             id: scopedId,
             schoolId,
+            staffId: assignedStaffId,
             name: staff.name.trim(),
             email: cleanEmail,
             username: cleanUsername,
@@ -1232,6 +1318,7 @@ export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAcc
           .onConflictDoUpdate({
             target: staffTeachers.id,
             set: {
+              staffId: assignedStaffId,
               name: staff.name.trim(),
               email: cleanEmail,
               username: cleanUsername,
@@ -1247,6 +1334,7 @@ export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAcc
           .insert(users)
           .values({
             uid: `local:${scopedId}`,
+            staffId: assignedStaffId,
             email: cleanEmail,
             username: cleanUsername,
             phone: normalizedPhone,
@@ -1260,6 +1348,7 @@ export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAcc
           .onConflictDoUpdate({
             target: users.uid,
             set: {
+              staffId: assignedStaffId,
               email: cleanEmail,
               username: cleanUsername,
               phone: normalizedPhone,
@@ -1268,9 +1357,21 @@ export async function bulkUpsertTenantStaff(schoolId: string, staffList: UserAcc
               active: staff.active,
             },
           });
+
+        savedResults.push({
+          ...staff,
+          id: scopedId,
+          staffId: assignedStaffId,
+          email: cleanEmail,
+          username: cleanUsername,
+          role: normalizedRole,
+          phone: normalizedPhone ?? undefined,
+          password: '********',
+        });
       }
+
+      return savedResults;
     });
-    return staffList;
   } catch (error) {
     console.error('Failed to bulk upload staff members:', error);
     throw new Error('Failed to import staff directory.', { cause: error });

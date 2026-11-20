@@ -1,4 +1,4 @@
-import { eq, isNull, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import {
   DEFAULT_ALEVEL_GRADING_SCALE,
   DEFAULT_ALEVEL_POLICY,
@@ -15,9 +15,17 @@ import type {
   SchoolTenant,
   SubscriptionPlan,
 } from '../types.ts';
+import {
+  extractSchoolInitials,
+  formatStaffId,
+  formatStudentId,
+  generateNextSchoolCode,
+  generateNextStaffId,
+  generateNextStudentId,
+} from '../utils/idGenerator.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 import { normalizeStoredPhone } from '../utils/validation.ts';
-import { db, ensureReachableDbConnection } from './index.ts';
+import { createClient, db, ensureReachableDbConnection } from './index.ts';
 import {
   classesStreams,
   examinations,
@@ -77,9 +85,295 @@ function sanitizeSubdomain(raw: string): string {
     .slice(0, 32);
 }
 
+/**
+ * Ensures new multi-tenant school_code / staff_id / student_id columns and composite
+ * unique constraints exist even on previously provisioned PostgreSQL databases,
+ * and backfills existing seeded rows deterministically.
+ */
+async function ensureSchemaColumnsAndBackfill(): Promise<void> {
+  const client = createClient();
+
+  const existingCols = (await client.unsafe(`
+    SELECT table_name, column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND (
+        (table_name = 'schools' AND column_name = 'school_code')
+        OR (table_name = 'users' AND column_name = 'staff_id')
+        OR (table_name = 'staff_teachers' AND column_name = 'staff_id')
+        OR (table_name = 'students' AND column_name = 'student_id')
+      )
+  `)) as Array<{ table_name: string; column_name: string }>;
+
+  const hasCol = (table: string, col: string) =>
+    existingCols.some((c) => c.table_name === table && c.column_name === col);
+
+  const missingColStatements: string[] = [];
+  if (!hasCol('schools', 'school_code')) {
+    missingColStatements.push('ALTER TABLE schools ADD COLUMN IF NOT EXISTS school_code text;');
+  }
+  if (!hasCol('users', 'staff_id')) {
+    missingColStatements.push('ALTER TABLE users ADD COLUMN IF NOT EXISTS staff_id text;');
+  }
+  if (!hasCol('staff_teachers', 'staff_id')) {
+    missingColStatements.push('ALTER TABLE staff_teachers ADD COLUMN IF NOT EXISTS staff_id text;');
+  }
+  if (!hasCol('students', 'student_id')) {
+    missingColStatements.push('ALTER TABLE students ADD COLUMN IF NOT EXISTS student_id text;');
+  }
+
+  if (missingColStatements.length > 0) {
+    await client.unsafe(missingColStatements.join('\n'));
+  }
+
+  const schoolRows = (await client.unsafe(
+    `SELECT id, name, school_code FROM schools ORDER BY created_at ASC, id ASC`
+  )) as Array<{ id: string; name: string; school_code: string | null }>;
+
+  const usedSchoolCodes = schoolRows
+    .map((r) => r.school_code)
+    .filter((v): v is string => Boolean(v && v.trim()));
+
+  const schoolInitialsById = new Map<string, string>();
+
+  for (const s of schoolRows) {
+    schoolInitialsById.set(s.id, extractSchoolInitials(s.name));
+    if (!s.school_code || !s.school_code.trim()) {
+      const nextCode = generateNextSchoolCode(s.name, usedSchoolCodes);
+      usedSchoolCodes.push(nextCode);
+      await client.unsafe(`UPDATE schools SET school_code = $1 WHERE id = $2`, [nextCode, s.id]);
+    }
+  }
+
+  for (const s of schoolRows) {
+    const initials = schoolInitialsById.get(s.id) ?? extractSchoolInitials(s.name);
+
+    // Backfill staff_teachers.staff_id per school starting at 001
+    const staffRows = (await client.unsafe(
+      `SELECT id, email, staff_id FROM staff_teachers WHERE school_id = $1 ORDER BY created_at ASC, id ASC`,
+      [s.id]
+    )) as Array<{ id: string; email: string; staff_id: string | null }>;
+
+    const usedStaffIds = staffRows
+      .map((r) => r.staff_id)
+      .filter((v): v is string => Boolean(v && v.trim()));
+
+    for (const st of staffRows) {
+      let assignedStaffId = st.staff_id?.trim() || null;
+      if (!assignedStaffId) {
+        assignedStaffId = generateNextStaffId(initials, usedStaffIds, true);
+        usedStaffIds.push(assignedStaffId);
+        await client.unsafe(`UPDATE staff_teachers SET staff_id = $1 WHERE id = $2`, [
+          assignedStaffId,
+          st.id,
+        ]);
+      }
+
+      // Synchronize users.staff_id for matching local uid or scoped email
+      await client.unsafe(
+        `UPDATE users SET staff_id = $1
+         WHERE (uid = $2 OR (school_id = $3 AND lower(trim(email)) = lower(trim($4))))
+           AND (staff_id IS NULL OR trim(staff_id) = '')`,
+        [assignedStaffId, `local:${st.id}`, s.id, st.email]
+      );
+    }
+
+    // Backfill any school-scoped users row that does not yet have a staff_id
+    const orphanUsers = (await client.unsafe(
+      `SELECT id, staff_id FROM users WHERE school_id = $1 AND global_role != 'super_admin' ORDER BY id ASC`,
+      [s.id]
+    )) as Array<{ id: number; staff_id: string | null }>;
+
+    const usedUserStaffIds = [
+      ...usedStaffIds,
+      ...orphanUsers.map((u) => u.staff_id).filter((v): v is string => Boolean(v && v.trim())),
+    ];
+
+    for (const u of orphanUsers) {
+      if (!u.staff_id || !u.staff_id.trim()) {
+        const nextStaffId = generateNextStaffId(initials, usedUserStaffIds, true);
+        usedUserStaffIds.push(nextStaffId);
+        await client.unsafe(`UPDATE users SET staff_id = $1 WHERE id = $2`, [nextStaffId, u.id]);
+      }
+    }
+
+    // Backfill students.student_id per school starting at 001
+    const studentRows = (await client.unsafe(
+      `SELECT id, student_id FROM students WHERE school_id = $1 ORDER BY created_at ASC, id ASC`,
+      [s.id]
+    )) as Array<{ id: string; student_id: string | null }>;
+
+    const usedStudentIds = studentRows
+      .map((r) => r.student_id)
+      .filter((v): v is string => Boolean(v && v.trim()));
+
+    for (const stu of studentRows) {
+      if (!stu.student_id || !stu.student_id.trim()) {
+        const nextStuId = generateNextStudentId(initials, usedStudentIds, true);
+        usedStudentIds.push(nextStuId);
+        await client.unsafe(`UPDATE students SET student_id = $1 WHERE id = $2`, [
+          nextStuId,
+          stu.id,
+        ]);
+      }
+    }
+  }
+
+  const existingIdx = (await client.unsafe(`
+    SELECT indexname
+    FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname IN (
+        'schools_code_idx',
+        'users_school_staff_id_idx',
+        'staff_school_staff_id_idx',
+        'students_school_student_id_idx'
+      )
+  `)) as Array<{ indexname: string }>;
+
+  const hasIdx = (name: string) => existingIdx.some((i) => i.indexname === name);
+  const indexStatements: string[] = [];
+  if (!hasIdx('schools_code_idx')) {
+    indexStatements.push(`CREATE UNIQUE INDEX IF NOT EXISTS schools_code_idx ON schools (school_code);`);
+  }
+  if (!hasIdx('users_school_staff_id_idx')) {
+    indexStatements.push(
+      `CREATE UNIQUE INDEX IF NOT EXISTS users_school_staff_id_idx ON users (school_id, staff_id);`
+    );
+  }
+  if (!hasIdx('staff_school_staff_id_idx')) {
+    indexStatements.push(
+      `CREATE UNIQUE INDEX IF NOT EXISTS staff_school_staff_id_idx ON staff_teachers (school_id, staff_id);`
+    );
+  }
+  if (!hasIdx('students_school_student_id_idx')) {
+    indexStatements.push(
+      `CREATE UNIQUE INDEX IF NOT EXISTS students_school_student_id_idx ON students (school_id, student_id);`
+    );
+  }
+
+  if (indexStatements.length > 0) {
+    try {
+      await client.unsafe(indexStatements.join('\n'));
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code !== '42501') throw err;
+    }
+  }
+}
+
+async function ensureSuperAdminSeeded(): Promise<void> {
+  const envEmail = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
+  const envPassword = process.env.SUPER_ADMIN_PASSWORD?.trim();
+
+  if (envEmail && envPassword) {
+    const passwordHash = hashPassword(envPassword);
+    const envUid = `env:super_admin:${envEmail}`;
+
+    const existing = await db
+      .select()
+      .from(users)
+      .where(sql`lower(trim(${users.email})) = ${envEmail}`)
+      .limit(1);
+
+    if (existing[0]) {
+      const row = existing[0];
+      const shouldRefreshHash = !row.passwordHash || row.uid.startsWith('env:super_admin:');
+      await db
+        .update(users)
+        .set({
+          email: envEmail,
+          globalRole: 'super_admin',
+          schoolId: null,
+          active: true,
+          ...(shouldRefreshHash ? { passwordHash } : {}),
+        })
+        .where(eq(users.id, row.id));
+      return;
+    }
+
+    await db
+      .insert(users)
+      .values({
+        uid: envUid,
+        staffId: null,
+        email: envEmail,
+        username: envEmail.split('@')[0],
+        passwordHash,
+        name: 'Platform Super Admin',
+        globalRole: 'super_admin',
+        schoolId: null,
+        schoolRole: 'school_admin',
+        active: true,
+        lastLogin: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: users.uid,
+        set: {
+          email: envEmail,
+          passwordHash,
+          globalRole: 'super_admin',
+          schoolId: null,
+          active: true,
+        },
+      });
+    return;
+  }
+
+  // Fallback when SUPER_ADMIN_EMAIL/PASSWORD are not configured:
+  // backfill any passwordless super_admin row or seed a default Platform Super Admin.
+  const existingAdmins = await db
+    .select()
+    .from(users)
+    .where(eq(users.globalRole, 'super_admin'));
+
+  const fallbackHash = hashPassword(envPassword || 'password123');
+  if (existingAdmins.length > 0) {
+    for (const admin of existingAdmins) {
+      if (!admin.passwordHash) {
+        await db
+          .update(users)
+          .set({ passwordHash: fallbackHash, active: true })
+          .where(eq(users.id, admin.id));
+      }
+    }
+    return;
+  }
+
+  const fallbackEmail = envEmail || 'superadmin@schuleflow.ug';
+  await db
+    .insert(users)
+    .values({
+      uid: `env:super_admin:${fallbackEmail}`,
+      staffId: null,
+      email: fallbackEmail,
+      username: fallbackEmail.split('@')[0],
+      passwordHash: fallbackHash,
+      name: 'Platform Super Admin',
+      globalRole: 'super_admin',
+      schoolId: null,
+      schoolRole: 'school_admin',
+      active: true,
+      lastLogin: new Date(),
+    })
+    .onConflictDoNothing();
+}
+
 async function ensureSeededStaffCredentials(): Promise<void> {
-  const allStaff = await db.select().from(staffTeachers);
+  const [allSchools, allStaff] = await Promise.all([
+    db.select({ id: schools.id, name: schools.name }).from(schools),
+    db.select().from(staffTeachers),
+  ]);
   if (allStaff.length === 0) return;
+
+  const schoolNameMap = new Map(allSchools.map((s) => [s.id, s.name]));
+  const usedStaffIdsBySchool = new Map<string, string[]>();
+  for (const st of allStaff) {
+    if (!st.staffId) continue;
+    const list = usedStaffIdsBySchool.get(st.schoolId) ?? [];
+    list.push(st.staffId);
+    usedStaffIdsBySchool.set(st.schoolId, list);
+  }
 
   const defaultHash = hashPassword('password123');
   for (const st of allStaff) {
@@ -90,20 +384,30 @@ async function ensureSeededStaffCredentials(): Promise<void> {
     const needsHash = !st.passwordHash;
     const needsPhoneNorm = st.phone !== normPhone;
 
-    if (needsHash || needsPhoneNorm) {
+    let assignedStaffId = st.staffId?.trim() || null;
+    if (!assignedStaffId) {
+      const schoolName = schoolNameMap.get(st.schoolId) ?? 'School';
+      const used = usedStaffIdsBySchool.get(st.schoolId) ?? [];
+      assignedStaffId = generateNextStaffId(schoolName, used);
+      used.push(assignedStaffId);
+      usedStaffIdsBySchool.set(st.schoolId, used);
+    }
+
+    if (needsHash || needsPhoneNorm || st.staffId !== assignedStaffId) {
       await db
         .update(staffTeachers)
         .set({
           ...(needsHash ? { passwordHash: defaultHash, role: normRole } : {}),
           phone: normPhone,
+          staffId: assignedStaffId,
         })
         .where(eq(staffTeachers.id, st.id));
     }
 
     const existingUsers = await db
-      .select({ id: users.id, phone: users.phone })
+      .select({ id: users.id, phone: users.phone, staffId: users.staffId })
       .from(users)
-      .where(sql`lower(${users.email}) = ${cleanEmail}`)
+      .where(eq(users.uid, `local:${st.id}`))
       .limit(1);
 
     if (existingUsers.length === 0) {
@@ -111,6 +415,7 @@ async function ensureSeededStaffCredentials(): Promise<void> {
         .insert(users)
         .values({
           uid: `local:${st.id}`,
+          staffId: assignedStaffId,
           email: cleanEmail,
           username: cleanUser,
           phone: normPhone,
@@ -122,10 +427,13 @@ async function ensureSeededStaffCredentials(): Promise<void> {
           active: st.active,
         })
         .onConflictDoNothing();
-    } else if (!existingUsers[0].phone && normPhone) {
+    } else if ((!existingUsers[0].phone && normPhone) || existingUsers[0].staffId !== assignedStaffId) {
       await db
         .update(users)
-        .set({ phone: normPhone })
+        .set({
+          ...(!existingUsers[0].phone && normPhone ? { phone: normPhone } : {}),
+          ...(assignedStaffId ? { staffId: assignedStaffId } : {}),
+        })
         .where(eq(users.id, existingUsers[0].id));
     }
   }
@@ -136,11 +444,15 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
     seedPromise = (async () => {
       try {
         await ensureReachableDbConnection();
+        await ensureSchemaColumnsAndBackfill();
+
         const existing = await db.select({ id: schools.id }).from(schools).limit(1);
         if (existing.length === 0) {
           await seedKampalaHorizon();
           await seedStMarysMbale();
         }
+
+        await ensureSuperAdminSeeded();
         await ensureSeededStaffCredentials();
       } catch (error) {
         seedPromise = null;
@@ -165,10 +477,12 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
 async function seedKampalaHorizon() {
   const schoolId = 'sch-kampala-horizon';
   const base = INITIAL_SCHOOL_DATABASE;
+  const initials = extractSchoolInitials(base.settings.schoolName);
 
   await db.transaction(async (tx) => {
     await tx.insert(schools).values({
       id: schoolId,
+      schoolCode: `${initials}-101`,
       name: base.settings.schoolName,
       subdomain: 'kampalahorizon',
       motto: base.settings.reportLayout.schoolMotto,
@@ -204,9 +518,10 @@ async function seedKampalaHorizon() {
     });
 
     await tx.insert(staffTeachers).values(
-      base.users.map((u) => ({
+      base.users.map((u, idx) => ({
         id: `${schoolId}:${u.id}`,
         schoolId,
+        staffId: formatStaffId(initials, idx + 1),
         name: u.name,
         email: u.email,
         username: u.username,
@@ -250,7 +565,7 @@ async function seedKampalaHorizon() {
         schoolId,
         name: c.name,
         gradeLevel: c.gradeLevel,
-        stream: c.stream,
+        stream: (c.stream ?? '').trim(),
         level: c.level,
         classTeacherId: `${schoolId}:${c.classTeacherId}`,
         subjectIds: c.subjectIds,
@@ -261,9 +576,10 @@ async function seedKampalaHorizon() {
     );
 
     await tx.insert(students).values(
-      base.students.map((stu) => ({
+      base.students.map((stu, idx) => ({
         id: stu.id,
         schoolId,
+        studentId: formatStudentId(initials, idx + 1),
         admissionNo: stu.admissionNo,
         fullName: stu.fullName,
         gender: stu.gender,
@@ -361,11 +677,14 @@ async function seedKampalaHorizon() {
 
 async function seedStMarysMbale() {
   const schoolId = 'sch-stmarys-mbale';
+  const schoolName = "St. Mary's College Mbale";
+  const initials = extractSchoolInitials(schoolName);
 
   await db.transaction(async (tx) => {
     await tx.insert(schools).values({
       id: schoolId,
-      name: "St. Mary's College Mbale",
+      schoolCode: `${initials}-102`,
+      name: schoolName,
       subdomain: 'stmarysmbale',
       motto: 'Disciplina, Scientia et Fides',
       logoUrl: null,
@@ -414,10 +733,11 @@ async function seedStMarysMbale() {
       {
         id: `${schoolId}:usr-admin`,
         schoolId,
+        staffId: formatStaffId(initials, 1),
         name: 'Mr. Stephen Wandera',
         email: 'admin@stmarysmbale.ac.ug',
         username: 'wandera',
-        role: 'admin',
+        role: 'school_admin',
         active: true,
         phone: '+256772801412',
         assignedClassIds: [],
@@ -426,6 +746,7 @@ async function seedStMarysMbale() {
       {
         id: `${schoolId}:usr-dos`,
         schoolId,
+        staffId: formatStaffId(initials, 2),
         name: 'Mr. Moses Wanyama',
         email: 'dos@stmarysmbale.ac.ug',
         username: 'wanyama',
@@ -438,6 +759,7 @@ async function seedStMarysMbale() {
       {
         id: `${schoolId}:usr-teacher-1`,
         schoolId,
+        staffId: formatStaffId(initials, 3),
         name: 'Ms. Sarah Nandutu',
         email: 'snandutu@stmarysmbale.ac.ug',
         username: 'nandutu',
@@ -643,8 +965,9 @@ async function seedStMarysMbale() {
     ];
 
     await tx.insert(students).values(
-      mbaleStudents.map((s) => ({
+      mbaleStudents.map((s, idx) => ({
         ...s,
+        studentId: formatStudentId(initials, idx + 1),
         schoolId,
         academicYear: '2026',
         status: 'active',
@@ -766,15 +1089,27 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
     throw new Error(`Subdomain "${cleanSub}" is already registered to another school.`);
   }
 
+  const existingCodesRows = await db.select({ schoolCode: schools.schoolCode }).from(schools);
+  const schoolCode = generateNextSchoolCode(
+    input.name.trim(),
+    existingCodesRows.map((r) => r.schoolCode)
+  );
+  const initials = extractSchoolInitials(input.name.trim());
+  const adminCode = formatStaffId(initials, 1);
+  const dosCode = formatStaffId(initials, 2);
+  const classTeacherCode = formatStaffId(initials, 3);
+  const bursarCode = formatStaffId(initials, 4);
+
   const scope: CurriculumScope = input.curriculumScope || 'olevel_alevel';
   const includeOlevel = scope === 'olevel_only' || scope === 'olevel_alevel';
   const includeAlevel = scope === 'alevel_only' || scope === 'olevel_alevel';
 
   const schoolId = `sch-${cleanSub}-${Date.now().toString(36).slice(-4)}`;
   const { quota, unitFeeUgx } = PLAN_QUOTAS[input.plan] ?? PLAN_QUOTAS.standard;
-  const adminStaffId = `${schoolId}:usr-admin`;
-  const dosStaffId = `${schoolId}:usr-dos`;
-  const classTeacherStaffId = `${schoolId}:usr-classteacher`;
+  const adminStaffRowId = `${schoolId}:usr-admin`;
+  const dosStaffRowId = `${schoolId}:usr-dos`;
+  const classTeacherStaffRowId = `${schoolId}:usr-classteacher`;
+  const bursarStaffRowId = `${schoolId}:usr-bursar`;
   const examId = `${schoolId}:exam-${input.academicYear || '2026'}-t3`;
 
   const scopedSubjects = INITIAL_SCHOOL_DATABASE.subjects
@@ -826,7 +1161,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
     .map((s) => s.id);
 
   const mapTeachers = (subIds: string[]) =>
-    Object.fromEntries(subIds.map((id) => [id, dosStaffId]));
+    Object.fromEntries(subIds.map((id) => [id, dosStaffRowId]));
 
   const seededClasses = [
     ...(includeOlevel
@@ -838,7 +1173,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.1',
             stream: 'East',
             level: 'olevel',
-            classTeacherId: classTeacherStaffId,
+            classTeacherId: classTeacherStaffRowId,
             subjectIds: olevelSubIds.slice(0, 6),
             subjectTeacherMap: mapTeachers(olevelSubIds.slice(0, 6)),
           },
@@ -849,7 +1184,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.2',
             stream: 'East',
             level: 'olevel',
-            classTeacherId: classTeacherStaffId,
+            classTeacherId: classTeacherStaffRowId,
             subjectIds: olevelSubIds.slice(0, 6),
             subjectTeacherMap: mapTeachers(olevelSubIds.slice(0, 6)),
           },
@@ -860,7 +1195,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.3',
             stream: 'West',
             level: 'olevel',
-            classTeacherId: dosStaffId,
+            classTeacherId: dosStaffRowId,
             subjectIds: olevelSubIds,
             subjectTeacherMap: mapTeachers(olevelSubIds),
           },
@@ -871,7 +1206,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.4',
             stream: 'West',
             level: 'olevel',
-            classTeacherId: dosStaffId,
+            classTeacherId: dosStaffRowId,
             subjectIds: olevelSubIds,
             subjectTeacherMap: mapTeachers(olevelSubIds),
           },
@@ -886,7 +1221,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.5',
             stream: 'Science',
             level: 'alevel',
-            classTeacherId: includeOlevel ? dosStaffId : classTeacherStaffId,
+            classTeacherId: includeOlevel ? dosStaffRowId : classTeacherStaffRowId,
             subjectIds: alevelSciSubIds,
             subjectTeacherMap: mapTeachers(alevelSciSubIds),
           },
@@ -897,7 +1232,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             gradeLevel: 'S.6',
             stream: 'Arts',
             level: 'alevel',
-            classTeacherId: dosStaffId,
+            classTeacherId: dosStaffRowId,
             subjectIds: alevelArtsSubIds,
             subjectTeacherMap: mapTeachers(alevelArtsSubIds),
           },
@@ -922,12 +1257,12 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
   const adminPhoneClean = normalizeStoredPhone(input.adminPhone) ?? schoolPhoneClean;
   const adminPasswordHash = hashPassword(input.adminPassword?.trim() || 'SchuleFlow2026!');
   const defaultStaffHash = hashPassword('SchuleFlow2026!');
-  const bursarStaffId = `${schoolId}:usr-bursar`;
 
   try {
     await db.transaction(async (tx) => {
       await tx.insert(schools).values({
         id: schoolId,
+        schoolCode,
         name: input.name.trim(),
         subdomain: cleanSub,
         ministryRegNo: input.ministryRegNo?.trim() || `MoES/SEC/${Date.now().toString().slice(-4)}`,
@@ -973,8 +1308,9 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
 
       await tx.insert(staffTeachers).values([
         {
-          id: adminStaffId,
+          id: adminStaffRowId,
           schoolId,
+          staffId: adminCode,
           name: input.adminName.trim(),
           email: adminEmailClean,
           username: adminUsernameClean,
@@ -986,8 +1322,9 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           assignedSubjectIds: [],
         },
         {
-          id: dosStaffId,
+          id: dosStaffRowId,
           schoolId,
+          staffId: dosCode,
           name: input.dosName.trim() || 'Director of Studies',
           email: `dos@${cleanSub}.ac.ug`,
           username: `dos_${cleanSub}`,
@@ -999,8 +1336,9 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           assignedSubjectIds: scopedSubjects.map((s) => s.id),
         },
         {
-          id: classTeacherStaffId,
+          id: classTeacherStaffRowId,
           schoolId,
+          staffId: classTeacherCode,
           name: 'Class Teacher (Homeroom)',
           email: `classteacher@${cleanSub}.ac.ug`,
           username: `teacher_${cleanSub}`,
@@ -1012,8 +1350,9 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           assignedSubjectIds: scopedSubjects.slice(0, 3).map((s) => s.id),
         },
         {
-          id: bursarStaffId,
+          id: bursarStaffRowId,
           schoolId,
+          staffId: bursarCode,
           name: 'School Bursar',
           email: `bursar@${cleanSub}.ac.ug`,
           username: `bursar_${cleanSub}`,
@@ -1026,16 +1365,12 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
         },
       ]);
 
-      const existingAdminUser = await tx
-        .select({ id: users.id, globalRole: users.globalRole })
-        .from(users)
-        .where(sql`lower(trim(${users.email})) = ${adminEmailClean}`)
-        .limit(1);
-
-      if (existingAdminUser[0] && existingAdminUser[0].globalRole !== 'super_admin') {
-        await tx
-          .update(users)
-          .set({
+      await tx
+        .insert(users)
+        .values([
+          {
+            uid: `local:${adminStaffRowId}`,
+            staffId: adminCode,
             email: adminEmailClean,
             username: adminUsernameClean,
             phone: adminPhoneClean,
@@ -1045,31 +1380,10 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             schoolId,
             schoolRole: 'school_admin',
             active: true,
-          })
-          .where(eq(users.id, existingAdminUser[0].id));
-      }
-
-      await tx
-        .insert(users)
-        .values([
-          ...(existingAdminUser[0]
-            ? []
-            : [
-                {
-                  uid: `local:${adminStaffId}`,
-                  email: adminEmailClean,
-                  username: adminUsernameClean,
-                  phone: adminPhoneClean,
-                  passwordHash: adminPasswordHash,
-                  name: input.adminName.trim(),
-                  globalRole: 'school_user',
-                  schoolId,
-                  schoolRole: 'school_admin',
-                  active: true,
-                },
-              ]),
+          },
           {
-            uid: `local:${dosStaffId}`,
+            uid: `local:${dosStaffRowId}`,
+            staffId: dosCode,
             email: `dos@${cleanSub}.ac.ug`,
             username: `dos_${cleanSub}`,
             phone: null,
@@ -1081,7 +1395,8 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             active: true,
           },
           {
-            uid: `local:${classTeacherStaffId}`,
+            uid: `local:${classTeacherStaffRowId}`,
+            staffId: classTeacherCode,
             email: `classteacher@${cleanSub}.ac.ug`,
             username: `teacher_${cleanSub}`,
             phone: null,
@@ -1093,7 +1408,8 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             active: true,
           },
           {
-            uid: `local:${bursarStaffId}`,
+            uid: `local:${bursarStaffRowId}`,
+            staffId: bursarCode,
             email: `bursar@${cleanSub}.ac.ug`,
             username: `bursar_${cleanSub}`,
             phone: null,
@@ -1169,6 +1485,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
     const row = created[0];
     return {
       id: row.id,
+      schoolCode: row.schoolCode,
       name: row.name,
       subdomain: row.subdomain,
       ministryRegNo: row.ministryRegNo,
@@ -1196,6 +1513,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
       reportsGeneratedCount: row.reportsGeneratedCount,
       activeStudentCount: 0,
       staffCount: 4,
+      adminStaffId: adminCode,
       createdAt: row.createdAt.toISOString(),
     };
   } catch (error) {

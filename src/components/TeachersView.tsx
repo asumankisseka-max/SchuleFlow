@@ -77,9 +77,16 @@ export function TeachersView({
                     <Award className="h-5 w-5" aria-hidden="true" />
                   </div>
                   <div>
-                    <h3 className="font-display text-sm font-bold text-slate-900">
-                      {teacher.name}
-                    </h3>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-display text-sm font-bold text-slate-900">
+                        {teacher.name}
+                      </h3>
+                      {teacher.staffId && (
+                        <span className="rounded border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-slate-700">
+                          {teacher.staffId}
+                        </span>
+                      )}
+                    </div>
                     <p className="text-xs text-slate-500">{ROLE_DISPLAY_NAMES[teacher.role]}</p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-slate-500">
                       <span className="inline-flex items-center gap-1">

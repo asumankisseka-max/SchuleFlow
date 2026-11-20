@@ -26,6 +26,7 @@ export const schools = pgTable(
   'schools',
   {
     id: text('id').primaryKey(), // e.g., 'sch-kampala-horizon'
+    schoolCode: text('school_code').notNull(), // e.g., 'KHHS-101'
     name: text('name').notNull(),
     subdomain: text('subdomain').notNull().unique(), // e.g., 'kampalahorizon'
     ministryRegNo: text('ministry_reg_no').notNull().default('MoES/SEC/000'),
@@ -58,7 +59,10 @@ export const schools = pgTable(
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
   },
-  (table) => [uniqueIndex('schools_subdomain_idx').on(table.subdomain)]
+  (table) => [
+    uniqueIndex('schools_subdomain_idx').on(table.subdomain),
+    uniqueIndex('schools_code_idx').on(table.schoolCode),
+  ]
 );
 
 /* -------------------------------------------------------------------------- */
@@ -83,13 +87,14 @@ export const gradingConfigs = pgTable(
 );
 
 /* -------------------------------------------------------------------------- */
-/* 3. Authenticated Platform Users (Firebase Auth UID <-> School RBAC)        */
+/* 3. Authenticated Platform Users (PostgreSQL RBAC & Staff ID Login)         */
 /* -------------------------------------------------------------------------- */
 export const users = pgTable(
   'users',
   {
     id: serial('id').primaryKey(),
-    uid: text('uid').notNull().unique(), // Firebase Auth UID or local:<staffId>
+    uid: text('uid').notNull().unique(), // local:<staffId> or env:super_admin:<email>
+    staffId: text('staff_id'), // e.g., 'KHS-TCH-001' (scoped per school)
     email: text('email').notNull(),
     username: text('username'),
     phone: text('phone'),
@@ -107,6 +112,7 @@ export const users = pgTable(
     index('users_username_idx').on(table.username),
     index('users_phone_idx').on(table.phone),
     index('users_school_idx').on(table.schoolId),
+    uniqueIndex('users_school_staff_id_idx').on(table.schoolId, table.staffId),
   ]
 );
 
@@ -120,6 +126,7 @@ export const staffTeachers = pgTable(
     schoolId: text('school_id')
       .notNull()
       .references(() => schools.id, { onDelete: 'cascade' }),
+    staffId: text('staff_id'), // e.g., 'KHS-TCH-001' (unique per school)
     name: text('name').notNull(),
     email: text('email').notNull(),
     username: text('username').notNull(),
@@ -135,6 +142,7 @@ export const staffTeachers = pgTable(
   (table) => [
     index('staff_school_idx').on(table.schoolId),
     index('staff_email_idx').on(table.schoolId, table.email),
+    uniqueIndex('staff_school_staff_id_idx').on(table.schoolId, table.staffId),
   ]
 );
 
@@ -208,6 +216,7 @@ export const students = pgTable(
     schoolId: text('school_id')
       .notNull()
       .references(() => schools.id, { onDelete: 'cascade' }),
+    studentId: text('student_id'), // e.g., 'KHS-STD-001' (unique per school)
     admissionNo: text('admission_no').notNull(),
     fullName: text('full_name').notNull(),
     gender: text('gender').notNull(), // 'M' | 'F'
@@ -225,6 +234,7 @@ export const students = pgTable(
   (table) => [
     index('students_school_idx').on(table.schoolId),
     index('students_school_class_idx').on(table.schoolId, table.classId),
+    uniqueIndex('students_school_student_id_idx').on(table.schoolId, table.studentId),
   ]
 );
 

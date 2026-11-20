@@ -86,6 +86,7 @@ export function PlatformAdminView({
     return schools.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
+        (s.schoolCode ?? '').toLowerCase().includes(q) ||
         s.subdomain.toLowerCase().includes(q) ||
         (s.ministryRegNo ?? '').toLowerCase().includes(q) ||
         (s.subCounty ?? '').toLowerCase().includes(q) ||
@@ -373,7 +374,12 @@ export function PlatformAdminView({
                   return (
                     <tr key={school.id} className="hover:bg-slate-50">
                       <td className="py-3 px-4">
-                        <div className="font-semibold text-slate-900">{school.name}</div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-slate-900">{school.name}</span>
+                          <span className="rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-blue-900">
+                            {school.schoolCode}
+                          </span>
+                        </div>
                         <div className="font-mono text-[11px] text-slate-500">
                           {school.ministryRegNo || 'MoES/SEC/—'} · {school.subdomain}.schuleflow.ug
                         </div>
@@ -579,7 +585,7 @@ export function PlatformAdminView({
         onOnboarded={async (created) => {
           await onRefreshPlatform();
           setNotice(
-            `Onboarded "${created.name}" (${created.ministryRegNo}) and created primary School Admin account.`
+            `Onboarded "${created.name}" (${created.schoolCode}${created.adminStaffId ? ` · Admin ${created.adminStaffId}` : ''}).`
           );
         }}
       />

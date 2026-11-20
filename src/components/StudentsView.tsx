@@ -28,6 +28,12 @@ import {
   parseStudentDirectoryExcel,
   type StudentDirectoryImportRow,
 } from '../utils/excel';
+import {
+  extractSchoolInitials,
+  formatStudentId,
+  generateNextStudentId,
+  getNextSequenceNumber,
+} from '../utils/idGenerator';
 import { processStudentPhoto } from '../utils/photo';
 import { canManageAcademicSetup } from '../utils/rbac';
 import { validateUgandanPhone } from '../utils/validation';
@@ -109,6 +115,25 @@ export function StudentsView({
   const photoInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
 
+  const schoolInitials = useMemo(() => extractSchoolInitials(schoolName), [schoolName]);
+  const nextStudentIdPreview = useMemo(
+    () =>
+      generateNextStudentId(
+        schoolInitials,
+        students.map((s) => s.studentId),
+        true
+      ),
+    [schoolInitials, students]
+  );
+  const nextStudentSeqStart = useMemo(
+    () =>
+      getNextSequenceNumber(
+        students.map((s) => s.studentId),
+        'STD'
+      ),
+    [students]
+  );
+
   const classMap = useMemo(() => new Map(classes.map((c) => [c.id, c])), [classes]);
   const comboMap = useMemo(() => new Map(combinations.map((c) => [c.id, c])), [combinations]);
 
@@ -121,19 +146,19 @@ export function StudentsView({
         if (q) {
           return (
             s.fullName.toLowerCase().includes(q) ||
+            (s.studentId ?? '').toLowerCase().includes(q) ||
             s.admissionNo.toLowerCase().includes(q) ||
             (s.parentName ?? '').toLowerCase().includes(q)
           );
         }
         return true;
       })
-      .sort((a, b) => a.admissionNo.localeCompare(b.admissionNo));
+      .sort((a, b) => (a.studentId || a.admissionNo).localeCompare(b.studentId || b.admissionNo));
   }, [students, classFilter, statusFilter, search]);
 
   const openAddModal = () => {
-    const nextNum = students.length + 1;
     setEditingStudent(null);
-    setAdmissionNo(`KHHS/${academicYear.slice(-2)}/${String(200 + nextNum)}`);
+    setAdmissionNo(nextStudentIdPreview);
     setFullName('');
     setGender('F');
     setDateOfBirth('');
@@ -192,6 +217,7 @@ export function StudentsView({
 
     const payload: StudentProfile = {
       id: editingStudent?.id ?? `stu-${Date.now()}`,
+      studentId: editingStudent?.studentId,
       admissionNo: cleanAdm,
       fullName: cleanName,
       gender,
@@ -416,7 +442,7 @@ export function StudentsView({
                     />
                   </th>
                 )}
-                <th className="py-2.5 px-3">Admission No.</th>
+                <th className="py-2.5 px-3">Student ID / Adm No.</th>
                 <th className="py-2.5 px-3">Student Name</th>
                 <th className="py-2.5 px-3">Gender</th>
                 <th className="py-2.5 px-3">Class / Stream</th>
@@ -449,8 +475,13 @@ export function StudentsView({
                           />
                         </td>
                       )}
-                      <td className="py-2.5 px-3 font-mono font-semibold tabular-nums text-slate-800 whitespace-nowrap">
-                        {stu.admissionNo}
+                      <td className="py-2.5 px-3 font-mono tabular-nums whitespace-nowrap">
+                        <div className="font-semibold text-slate-900">
+                          {stu.studentId || stu.admissionNo}
+                        </div>
+                        {stu.studentId && stu.admissionNo && stu.studentId !== stu.admissionNo && (
+                          <div className="text-[10px] text-slate-400">Adm: {stu.admissionNo}</div>
+                        )}
                       </td>
                       <td className="py-2.5 px-3">
                         <div className="flex items-center gap-2.5">
@@ -576,6 +607,17 @@ export function StudentsView({
                   {formError}
                 </div>
               )}
+
+              <div className="rounded-md border border-blue-200 bg-blue-50/70 px-3 py-2 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-blue-900">
+                  {editingStudent ? 'Assigned School Student ID' : 'Auto-Generated Student ID'}
+                </span>
+                <span className="font-mono text-xs font-bold text-blue-950">
+                  {editingStudent
+                    ? editingStudent.studentId || editingStudent.admissionNo
+                    : nextStudentIdPreview}
+                </span>
+              </div>
 
               {/* Passport Photo + Core ID */}
               <div className="flex flex-col sm:flex-row gap-4 items-start">
@@ -778,7 +820,7 @@ export function StudentsView({
                   Preview Bulk Student Import
                 </h3>
                 <p className="text-xs text-slate-500">
-                  {importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid).length} valid new students ·{' '}
+                  {importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid && r.fullName).length} valid new students ·{' '}
                   {importRows.filter((r) => r.isDuplicate).length} duplicate/skipped ·{' '}
                   {importRows.filter((r) => r.phoneInvalid).length} invalid phone
                 </p>
@@ -814,6 +856,7 @@ export function StudentsView({
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="bg-slate-50 border-b border-slate-200 font-semibold text-slate-700">
+                      <th className="py-2 px-3">Student ID</th>
                       <th className="py-2 px-3">Adm No</th>
                       <th className="py-2 px-3">Name</th>
                       <th className="py-2 px-3">Gender</th>
@@ -822,33 +865,49 @@ export function StudentsView({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {importRows.map((row) => (
-                      <tr key={row.rowNumber}>
-                        <td className="py-2 px-3 font-mono">{row.admissionNo || 'Missing'}</td>
-                        <td className="py-2 px-3">{row.fullName}</td>
-                        <td className="py-2 px-3 font-mono">{row.gender}</td>
-                        <td className="py-2 px-3 font-mono">
-                          {row.phoneInvalid ? (
-                            <span className="text-red-700">{row.parentContact || 'Invalid'}</span>
-                          ) : (
-                            row.parentContact || '—'
-                          )}
-                        </td>
-                        <td className="py-2 px-3">
-                          {row.isDuplicate ? (
-                            <span className="text-amber-700 font-medium">
-                              Duplicate / Skipped
-                            </span>
-                          ) : row.phoneInvalid ? (
-                            <span className="text-red-700 font-medium">
-                              Invalid Ugandan Phone
-                            </span>
-                          ) : (
-                            <span className="text-emerald-700 font-medium">Ready to Import</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
+                    {(() => {
+                      let seqOffset = 0;
+                      return importRows.map((row) => {
+                        const isReady = !row.isDuplicate && !row.phoneInvalid && Boolean(row.fullName);
+                        const projectedId = isReady
+                          ? formatStudentId(schoolInitials, nextStudentSeqStart + seqOffset++)
+                          : '—';
+                        return (
+                          <tr key={row.rowNumber}>
+                            <td className="py-2 px-3 font-mono font-semibold text-blue-900">
+                              {projectedId}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-slate-600">
+                              {row.admissionNo || `Auto (${projectedId})`}
+                            </td>
+                            <td className="py-2 px-3">{row.fullName || 'Missing'}</td>
+                            <td className="py-2 px-3 font-mono">{row.gender}</td>
+                            <td className="py-2 px-3 font-mono">
+                              {row.phoneInvalid ? (
+                                <span className="text-red-700">{row.parentContact || 'Invalid'}</span>
+                              ) : (
+                                row.parentContact || '—'
+                              )}
+                            </td>
+                            <td className="py-2 px-3">
+                              {row.isDuplicate ? (
+                                <span className="text-amber-700 font-medium">
+                                  Duplicate / Skipped
+                                </span>
+                              ) : row.phoneInvalid ? (
+                                <span className="text-red-700 font-medium">
+                                  Invalid Ugandan Phone
+                                </span>
+                              ) : !row.fullName ? (
+                                <span className="text-red-700 font-medium">Missing Name</span>
+                              ) : (
+                                <span className="text-emerald-700 font-medium">Ready to Import</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
+                    })()}
                   </tbody>
                 </table>
               </div>
@@ -864,11 +923,11 @@ export function StudentsView({
               </button>
               <button
                 type="button"
-                disabled={importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid).length === 0}
+                disabled={importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid && r.fullName).length === 0}
                 onClick={confirmBulkImport}
                 className="rounded-md bg-blue-900 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-950 disabled:opacity-40"
               >
-                Import {importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid).length} Students
+                Import {importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid && r.fullName).length} Students
               </button>
             </div>
           </div>

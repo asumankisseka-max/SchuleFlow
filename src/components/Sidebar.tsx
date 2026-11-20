@@ -36,6 +36,7 @@ interface SidebarProps {
   activeTab: WorkspaceTab;
   onSelectTab: (tab: WorkspaceTab) => void;
   settings: SchoolSettings;
+  schoolCode?: string;
   pendingApprovalCount: number;
   returnedCount: number;
   mobileOpen: boolean;
@@ -104,6 +105,7 @@ export function Sidebar({
   activeTab,
   onSelectTab,
   settings,
+  schoolCode,
   pendingApprovalCount,
   returnedCount,
   mobileOpen,
@@ -170,7 +172,7 @@ export function Sidebar({
                   SchuleFlow
                 </span>
                 <span className="text-[11px] text-slate-500 truncate block">
-                  {settings.schoolName}
+                  {schoolCode ? `${schoolCode} · ${settings.schoolName}` : settings.schoolName}
                 </span>
               </div>
             </div>
@@ -318,6 +320,7 @@ export function Sidebar({
               <p className="text-xs font-semibold text-slate-900 truncate">{currentUser.name}</p>
               <p className="text-[11px] text-slate-500 truncate">
                 {ROLE_DISPLAY_NAMES[normalizedRole]}
+                {currentUser.staffId ? ` · ${currentUser.staffId}` : ''}
               </p>
             </div>
           )}

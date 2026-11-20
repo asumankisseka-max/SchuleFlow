@@ -1,20 +1,57 @@
 import type { NextFunction, Request, Response } from 'express';
-import type { User as SupabaseUser } from '@supabase/supabase-js';
 import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { schools } from '../db/schema.ts';
 import { ensureInitialTenantsSeeded } from '../db/seed.ts';
-import { getOrCreateUser, getUserProfileByUid } from '../db/users.ts';
-import { isLocalSessionToken, verifySessionToken } from '../lib/passwordAuth.ts';
-import { createSupabaseServerClient } from '../lib/supabase.ts';
-import type { AuthSessionProfile, SchoolTenant, UserRole } from '../types.ts';
+import { getUserProfileByUid } from '../db/users.ts';
+import { verifySessionToken } from '../lib/passwordAuth.ts';
+import type { AuthSessionProfile, GlobalRole, SchoolTenant, UserRole } from '../types.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 
+export const SESSION_COOKIE_NAME = 'sf_session';
+
+export interface AuthTokenContext {
+  userId?: number;
+  uid: string;
+  staffId?: string;
+  schoolId: string | null;
+  role: UserRole;
+  globalRole: GlobalRole;
+}
+
 export interface AuthRequest extends Request {
-  user?: SupabaseUser;
+  user?: AuthTokenContext;
   dbUser?: AuthSessionProfile;
   schoolId?: string;
   school?: SchoolTenant;
+}
+
+function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  if (!cookieHeader) return {};
+  const result: Record<string, string> = {};
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx <= 0) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(val);
+    } catch {
+      result[key] = val;
+    }
+  }
+  return result;
+}
+
+function extractSessionToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice('Bearer '.length).trim();
+    if (bearer) return bearer;
+  }
+  const cookies = parseCookies(req.headers.cookie);
+  return cookies[SESSION_COOKIE_NAME] || null;
 }
 
 export async function checkSchoolSubscriptionGate(
@@ -69,12 +106,7 @@ export async function checkSchoolSubscriptionGate(
 }
 
 export const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
-  }
-
-  const token = authHeader.slice('Bearer '.length).trim();
+  const token = extractSessionToken(req);
   if (!token) {
     return res.status(401).json({ error: 'Unauthorized: Missing authentication token' });
   }
@@ -82,40 +114,29 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
   try {
     await ensureInitialTenantsSeeded();
 
-    let dbUser: AuthSessionProfile | null = null;
+    const session = verifySessionToken(token);
+    if (!session) {
+      return res.status(401).json({ error: 'Unauthorized: Session expired. Please sign in again.' });
+    }
 
-    if (isLocalSessionToken(token)) {
-      const session = verifySessionToken(token);
-      if (!session) {
-        return res.status(401).json({ error: 'Unauthorized: Session expired. Please sign in again.' });
-      }
-      dbUser = await getUserProfileByUid(session.uid);
-      if (!dbUser) {
-        return res.status(401).json({ error: 'Unauthorized: User account no longer exists.' });
-      }
-    } else {
-      const supabaseServer = createSupabaseServerClient();
-      const { data, error } = await supabaseServer.auth.getUser(token);
-      if (error || !data?.user) {
-        return res.status(401).json({ error: 'Unauthorized: Invalid or expired session token' });
-      }
-
-      req.user = data.user;
-      const email = data.user.email ?? `${data.user.id}@schuleflow.local`;
-      const meta = data.user.user_metadata as Record<string, unknown> | undefined;
-      const displayName =
-        typeof meta?.full_name === 'string'
-          ? meta.full_name
-          : typeof meta?.name === 'string'
-            ? meta.name
-            : undefined;
-
-      dbUser = await getOrCreateUser(data.user.id, email, displayName);
+    const dbUser = await getUserProfileByUid(session.uid);
+    if (!dbUser) {
+      return res.status(401).json({ error: 'Unauthorized: User account no longer exists.' });
     }
 
     if (!dbUser.active) {
       return res.status(403).json({
         error: 'Account deactivated. Please contact your School Administrator.',
+      });
+    }
+
+    // Strict school binding check between verified token and PostgreSQL record
+    if (
+      dbUser.globalRole !== 'super_admin' &&
+      session.schoolId !== dbUser.schoolId
+    ) {
+      return res.status(403).json({
+        error: 'Session tenant mismatch detected. Please sign in again.',
       });
     }
 
@@ -130,6 +151,14 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
       }
     }
 
+    req.user = {
+      userId: session.userId ?? dbUser.userId,
+      uid: dbUser.uid,
+      staffId: session.staffId ?? dbUser.staffId,
+      schoolId: dbUser.globalRole === 'super_admin' ? null : session.schoolId,
+      role: normalizeUserRole(session.role ?? dbUser.schoolRole),
+      globalRole: dbUser.globalRole,
+    };
     req.dbUser = dbUser;
     next();
   } catch (error) {
