@@ -160,8 +160,13 @@ export function AccountRecoveryModal({
   const handlePasswordReset = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    if (newPassword.trim().length < 6) {
-      setError('New password must be at least 6 characters.');
+    const trimmedPwd = newPassword.trim();
+    if (trimmedPwd.length < 8) {
+      setError('New password must be at least 8 characters long.');
+      return;
+    }
+    if (!/[A-Za-z]/.test(trimmedPwd) || !/[0-9]/.test(trimmedPwd)) {
+      setError('New password must include at least one letter and one number.');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -363,9 +368,7 @@ export function AccountRecoveryModal({
 
               <div>
                 <label className="block font-medium text-slate-700 mb-1.5">
-                  {lookupData.lookupMethod === 'identifier'
-                    ? 'Confirm your Full Name (as registered) or your alternate Email / Phone'
-                    : 'Confirm your Registered Phone Number (or last 4 digits), Staff ID, or Email'}
+                  Confirm your Registered Phone Number, Staff ID, or Email
                 </label>
                 <input
                   type="text"
@@ -373,11 +376,7 @@ export function AccountRecoveryModal({
                   disabled={loading}
                   value={verification}
                   onChange={(e) => setVerification(e.target.value)}
-                  placeholder={
-                    lookupData.lookupMethod === 'identifier'
-                      ? 'e.g. Sarah Nabwire or 0772110401'
-                      : 'e.g. 0772110401, last 4 digits, Staff ID, or email'
-                  }
+                  placeholder="e.g. 0772110401, KHHS-TCH-001, or your registered email"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 focus:border-blue-800 focus:outline-none"
                 />
               </div>
@@ -488,8 +487,7 @@ export function AccountRecoveryModal({
                     <span>Password Updated Successfully</span>
                   </div>
                   <p className="text-[11px]">
-                    You can now sign in with your School Code, Staff ID or email, and your new
-                    password.
+                    You can now sign in with your Staff ID or email and your new password.
                   </p>
                 </div>
               ) : (
@@ -499,12 +497,12 @@ export function AccountRecoveryModal({
                   </div>
                   <div>
                     <label className="block font-medium text-slate-700 mb-1">
-                      New Password (min 6 characters)
+                      New Password (min 8 chars, letter &amp; number)
                     </label>
                     <div className="relative">
                       <input
                         type={showPassword ? 'text' : 'password'}
-                        minLength={6}
+                        minLength={8}
                         required
                         disabled={loading}
                         value={newPassword}
@@ -528,7 +526,7 @@ export function AccountRecoveryModal({
                     </label>
                     <input
                       type={showPassword ? 'text' : 'password'}
-                      minLength={6}
+                      minLength={8}
                       required
                       disabled={loading}
                       value={confirmPassword}

@@ -1,10 +1,13 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  Cloud,
   Database,
   Download,
+  FileSpreadsheet,
   ImagePlus,
+  Loader2,
   Palette,
   RotateCcw,
   Save,
@@ -20,6 +23,7 @@ import {
   DEFAULT_REPORT_CARD_LAYOUT,
 } from '../data/sampleData';
 import type { CurriculumScope, GradeBand, SchoolDatabase, SchoolSettings } from '../types';
+import { exportFullSchoolExcelArchive } from '../utils/excel';
 import { processSchoolBadge } from '../utils/photo';
 import {
   buildSchoolThemeVars,
@@ -30,11 +34,24 @@ import {
 } from '../utils/schoolTheme';
 import { ReportCardCustomizer } from './ReportCardCustomizer';
 
+export interface MediaStorageStatus {
+  configured: boolean;
+  bucket: string;
+  urlOrigin?: string;
+  inlineLogoCount: number;
+  inlineStudentPhotosCount: number;
+  supabaseStudentPhotosCount: number;
+}
+
 interface SettingsViewProps {
   settings: SchoolSettings;
   curriculumScope?: CurriculumScope;
+  schoolCode?: string;
   db: SchoolDatabase;
   onUpdateSettings: (updated: SchoolSettings) => void;
+  onUploadLogo?: (dataUrl: string) => Promise<string>;
+  onGetMediaStatus?: () => Promise<MediaStorageStatus>;
+  onMigrateMedia?: () => Promise<{ migratedLogos: number; migratedPhotos: number; skipped: number }>;
   onRestoreDatabase: (restored: SchoolDatabase) => void;
   onResetSampleData: () => void;
 }
@@ -42,8 +59,12 @@ interface SettingsViewProps {
 export function SettingsView({
   settings,
   curriculumScope = 'olevel_alevel',
+  schoolCode,
   db,
   onUpdateSettings,
+  onUploadLogo,
+  onGetMediaStatus,
+  onMigrateMedia,
   onRestoreDatabase,
   onResetSampleData,
 }: SettingsViewProps) {
@@ -60,9 +81,25 @@ export function SettingsView({
   const [savedNotice, setSavedNotice] = useState<string | null>(null);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const [uploadingBadge, setUploadingBadge] = useState(false);
+  const [mediaStatus, setMediaStatus] = useState<MediaStorageStatus | null>(null);
+  const [migratingMedia, setMigratingMedia] = useState(false);
 
   const restoreInputRef = useRef<HTMLInputElement | null>(null);
   const badgeInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!onGetMediaStatus) return;
+    let active = true;
+    onGetMediaStatus()
+      .then((res) => {
+        if (active) setMediaStatus(res);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [onGetMediaStatus]);
 
   const effectivePrimaryColor = normalizeHexColor(
     draft.uniformPrimaryColor,
@@ -77,21 +114,47 @@ export function SettingsView({
 
   const handleUploadBadge = async (file: File) => {
     setErrorNotice(null);
+    setUploadingBadge(true);
     try {
       const processed = await processSchoolBadge(file);
+      const storedUrl = onUploadLogo ? await onUploadLogo(processed) : processed;
       setDraft((prev) => ({
         ...prev,
-        badgeDataUrl: processed,
+        badgeDataUrl: storedUrl,
         reportLayout: {
           ...prev.reportLayout,
           crestType: 'custom',
-          customLogoDataUrl: processed,
+          customLogoDataUrl: storedUrl,
         },
       }));
     } catch (err: unknown) {
       setErrorNotice(
         err instanceof Error ? err.message : 'Failed to process school badge image.'
       );
+    } finally {
+      setUploadingBadge(false);
+    }
+  };
+
+  const handleMigrateToSupabase = async () => {
+    if (!onMigrateMedia) return;
+    setErrorNotice(null);
+    setMigratingMedia(true);
+    try {
+      const res = await onMigrateMedia();
+      setSavedNotice(
+        `Migrated ${res.migratedLogos} logo(s) and ${res.migratedPhotos} student photo(s) to Supabase Storage.`
+      );
+      if (onGetMediaStatus) {
+        const refreshed = await onGetMediaStatus();
+        setMediaStatus(refreshed);
+      }
+    } catch (err: unknown) {
+      setErrorNotice(
+        err instanceof Error ? err.message : 'Failed to migrate inline media to Supabase Storage.'
+      );
+    } finally {
+      setMigratingMedia(false);
     }
   };
 
@@ -370,11 +433,22 @@ export function SettingsView({
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
+                    disabled={uploadingBadge}
                     onClick={() => badgeInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                    className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:opacity-60"
                   >
-                    <ImagePlus className="h-3.5 w-3.5" aria-hidden="true" />
-                    <span>{activeBadgeUrl ? 'Change Badge' : 'Upload Badge'}</span>
+                    {uploadingBadge ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <ImagePlus className="h-3.5 w-3.5" aria-hidden="true" />
+                    )}
+                    <span>
+                      {uploadingBadge
+                        ? 'Uploading...'
+                        : activeBadgeUrl
+                          ? 'Change Badge'
+                          : 'Upload Badge'}
+                    </span>
                   </button>
                   {activeBadgeUrl && (
                     <button
@@ -944,6 +1018,7 @@ export function SettingsView({
       <section className="rounded-lg border border-slate-200 bg-white p-5">
         <ReportCardCustomizer
           layout={{ ...DEFAULT_REPORT_CARD_LAYOUT, ...draft.reportLayout }}
+          onUploadLogo={onUploadLogo}
           onChange={(updatedLayout) =>
             setDraft((prev) => ({
               ...prev,
@@ -957,16 +1032,57 @@ export function SettingsView({
         />
       </section>
 
-      {/* Module 16: Database Backup & Restore */}
+      {/* Supabase Media Storage Integration */}
+      {mediaStatus && (
+        <section className="rounded-lg border border-slate-200 bg-white p-5 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <Cloud className="h-5 w-5 text-blue-800 shrink-0 mt-0.5" aria-hidden="true" />
+            <div>
+              <h3 className="font-display text-sm font-bold text-slate-900">
+                Supabase Media Storage (Photos &amp; Logos)
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {mediaStatus.configured
+                  ? `Connected to bucket "${mediaStatus.bucket}" · ${mediaStatus.supabaseStudentPhotosCount} photo(s) in Supabase Storage · ${mediaStatus.inlineStudentPhotosCount} inline photo(s) · ${mediaStatus.inlineLogoCount} inline logo(s)`
+                  : `Supabase Storage environment keys are not configured; images are stored inline until SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided.`}
+              </p>
+            </div>
+          </div>
+
+          {onMigrateMedia && (
+            <button
+              type="button"
+              disabled={
+                migratingMedia ||
+                !mediaStatus.configured ||
+                (mediaStatus.inlineLogoCount === 0 && mediaStatus.inlineStudentPhotosCount === 0)
+              }
+              onClick={() => void handleMigrateToSupabase()}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+            >
+              {migratingMedia ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>
+                {migratingMedia ? 'Migrating...' : 'Migrate Legacy Media to Supabase'}
+              </span>
+            </button>
+          )}
+        </section>
+      )}
+
+      {/* Database Backup, Full Excel Archive & Restore */}
       <section className="rounded-lg border border-slate-200 bg-white p-5 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-start gap-3">
           <Database className="h-5 w-5 text-blue-800 shrink-0 mt-0.5" />
           <div>
             <h3 className="font-display text-sm font-bold text-slate-900">
-              System Data Backup &amp; Restore
+              System Data Backup &amp; Archive Exports
             </h3>
             <p className="text-xs text-slate-500">
-              Download an encrypted-ready JSON snapshot of all students, marksheets, exams, and school settings, or restore from a previous backup.
+              Export a multi-sheet Excel archive of students, classes, staff, and marksheets, download a JSON snapshot, or restore from backup.
             </p>
           </div>
         </div>
@@ -974,8 +1090,17 @@ export function SettingsView({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => exportFullSchoolExcelArchive(db, schoolCode)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-700" aria-hidden="true" />
+            <span>Export Excel Archive (.xlsx)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleExportJsonBackup}
-            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
           >
             <Download className="h-3.5 w-3.5" />
             <span>Export JSON Backup</span>
@@ -995,7 +1120,7 @@ export function SettingsView({
           <button
             type="button"
             onClick={() => restoreInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
           >
             <Upload className="h-3.5 w-3.5" />
             <span>Restore Backup</span>
@@ -1005,7 +1130,7 @@ export function SettingsView({
             <button
               type="button"
               onClick={() => setConfirmReset(true)}
-              className="rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+              className="rounded-md border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 whitespace-nowrap"
             >
               Reset Sample Data
             </button>
@@ -1017,7 +1142,7 @@ export function SettingsView({
                   onResetSampleData();
                   setConfirmReset(false);
                 }}
-                className="rounded-md bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-800"
+                className="rounded-md bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-800 whitespace-nowrap"
               >
                 Confirm Reset
               </button>

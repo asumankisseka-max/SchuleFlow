@@ -1,6 +1,8 @@
 import { useMemo } from 'react';
 import {
+  AlertTriangle,
   ArrowRight,
+  CalendarClock,
   CheckCircle2,
   ClipboardCheck,
   FileSpreadsheet,
@@ -29,7 +31,7 @@ interface DashboardViewProps {
   activeExam: ExaminationPeriod;
   curriculumScope?: CurriculumScope;
   onNavigate: (tab: WorkspaceTab) => void;
-  onSelectClassAndNavigate: (classId: string, tab: WorkspaceTab) => void;
+  onSelectClassAndNavigate: (classId: string, tab: WorkspaceTab, subjectId?: string) => void;
 }
 
 export function DashboardView({
@@ -41,25 +43,27 @@ export function DashboardView({
   onSelectClassAndNavigate,
 }: DashboardViewProps) {
   const scopedClasses = useMemo(() => {
-    const filtered = db.classes.filter((c) =>
+    const activeOnly = db.classes.filter((c) => !c.archived);
+    const filtered = activeOnly.filter((c) =>
       curriculumScope === 'olevel_only'
         ? c.level === 'olevel'
         : curriculumScope === 'alevel_only'
           ? c.level === 'alevel'
           : true
     );
-    return filtered.length > 0 ? filtered : db.classes;
+    return filtered.length > 0 ? filtered : activeOnly;
   }, [db.classes, curriculumScope]);
 
   const scopedSubjects = useMemo(() => {
-    const filtered = db.subjects.filter((s) =>
+    const activeOnly = db.subjects.filter((s) => !s.archived);
+    const filtered = activeOnly.filter((s) =>
       curriculumScope === 'olevel_only'
         ? s.level === 'olevel'
         : curriculumScope === 'alevel_only'
           ? s.level === 'alevel'
           : true
     );
-    return filtered.length > 0 ? filtered : db.subjects;
+    return filtered.length > 0 ? filtered : activeOnly;
   }, [db.subjects, curriculumScope]);
 
   const activeStudents = useMemo(
@@ -72,6 +76,28 @@ export function DashboardView({
     [scopedClasses, activeExam.classIds]
   );
 
+  const deadlineInfo = useMemo(() => {
+    const raw = activeExam.submissionDeadline?.trim();
+    if (!raw) return { label: 'No deadline set', overdue: false, urgent: false };
+    const dueMs = new Date(`${raw}T23:59:59`).getTime();
+    if (Number.isNaN(dueMs)) return { label: raw, overdue: false, urgent: false };
+    const diffDays = Math.ceil((dueMs - Date.now()) / 86400000);
+    if (diffDays < 0) {
+      return {
+        label: `Overdue by ${Math.abs(diffDays)}d`,
+        overdue: true,
+        urgent: true,
+      };
+    }
+    if (diffDays === 0) {
+      return { label: 'Due today', overdue: false, urgent: true };
+    }
+    if (diffDays <= 3) {
+      return { label: `${diffDays}d remaining`, overdue: false, urgent: true };
+    }
+    return { label: `${diffDays}d remaining`, overdue: false, urgent: false };
+  }, [activeExam.submissionDeadline]);
+
   // Expected subject marksheets for active exam
   const marksheetStats = useMemo(() => {
     const expectedList: Array<{
@@ -81,7 +107,10 @@ export function DashboardView({
       subjectName: string;
       teacherId: string;
       status: 'missing_sheet' | 'draft' | 'submitted' | 'returned' | 'approved' | 'published';
+      completedCount: number;
+      totalStudents: number;
       incompleteCount: number;
+      dosComment?: string;
     }> = [];
 
     const subjectMap = new Map(db.subjects.map((s) => [s.id, s]));
@@ -90,7 +119,7 @@ export function DashboardView({
       const clsStudents = activeStudents.filter((s) => s.classId === cls.id);
       for (const subId of cls.subjectIds) {
         const sub = subjectMap.get(subId);
-        if (!sub) continue;
+        if (!sub || sub.archived) continue;
         const ms = db.marksheets.find(
           (m) => m.examId === activeExam.id && m.classId === cls.id && m.subjectId === subId
         );
@@ -109,7 +138,10 @@ export function DashboardView({
           subjectName: sub.name,
           teacherId: ms?.teacherId ?? cls.subjectTeacherMap[subId] ?? '',
           status: ms ? ms.status : 'missing_sheet',
+          completedCount: validation.completedCount,
+          totalStudents: validation.totalStudents,
           incompleteCount: validation.missingCount + validation.invalidCount,
+          dosComment: ms?.dosComment,
         });
       }
     }
@@ -165,12 +197,12 @@ export function DashboardView({
 
   const homeroomClasses = useMemo(() => {
     if (currentUser.role !== 'class_teacher') return [];
-    return db.classes.filter(
+    return scopedClasses.filter(
       (c) =>
         c.classTeacherId === currentUser.id ||
         currentUser.assignedClassIds.includes(c.id)
     );
-  }, [db.classes, currentUser]);
+  }, [scopedClasses, currentUser]);
 
   const homeroomSheets = useMemo(() => {
     if (currentUser.role !== 'class_teacher') return [];
@@ -180,11 +212,22 @@ export function DashboardView({
 
   const myAssignedSheets = useMemo(() => {
     if (!isTeachingRole(currentUser.role)) return [];
-    return marksheetStats.expectedList.filter(
-      (item) =>
-        item.teacherId === currentUser.id ||
-        currentUser.assignedSubjectIds.includes(item.subjectId)
-    );
+    const priority: Record<string, number> = {
+      returned: 0,
+      missing_sheet: 1,
+      draft: 2,
+      submitted: 3,
+      approved: 4,
+      published: 5,
+    };
+    return marksheetStats.expectedList
+      .filter(
+        (item) =>
+          item.teacherId === currentUser.id ||
+          currentUser.assignedSubjectIds.includes(item.subjectId) ||
+          currentUser.assignedClassIds.includes(item.classId)
+      )
+      .sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
   }, [marksheetStats.expectedList, currentUser]);
 
   return (
@@ -408,87 +451,145 @@ export function DashboardView({
           {homeroomSheets.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-2 border-t border-slate-200">
               {homeroomSheets.slice(0, 6).map((item) => (
-                <button
-                  key={`${item.classId}-${item.subjectId}`}
-                  type="button"
-                  onClick={() => onSelectClassAndNavigate(item.classId, 'marks-entry')}
-                  className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-2.5 text-left hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
-                >
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold text-slate-900 truncate">
-                      {item.className} · {item.subjectName}
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      {item.incompleteCount > 0
-                        ? `${item.incompleteCount} missing/invalid`
-                        : 'Ready for review'}
-                    </p>
-                  </div>
-                  <span className="shrink-0 ml-2 rounded bg-slate-100 border border-slate-200 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-slate-700">
-                    {item.status === 'missing_sheet' ? 'Pending' : item.status}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
+                  <button
+                    key={`${item.classId}-${item.subjectId}`}
+                    type="button"
+                    onClick={() =>
+                      onSelectClassAndNavigate(item.classId, 'marks-entry', item.subjectId)
+                    }
+                    className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-2.5 text-left hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-900 truncate">
+                        {item.className} · {item.subjectName}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {item.incompleteCount > 0
+                          ? `${item.incompleteCount} missing/invalid`
+                          : 'Ready for review'}
+                      </p>
+                    </div>
+                    <span className="shrink-0 ml-2 font-mono text-[10px] font-semibold uppercase text-slate-600">
+                      {item.status === 'missing_sheet' ? 'Pending' : item.status}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
-      {/* Teacher-Focused Assignment Queue */}
-      {isTeachingRole(currentUser.role) && myAssignedSheets.length > 0 && (
-        <section className="rounded-lg border border-slate-200 bg-white p-5">
-          <div className="flex items-center justify-between gap-3 mb-3">
+      {/* Teacher-Focused "My Classes & Deadlines" Panel */}
+      {isTeachingRole(currentUser.role) && (
+        <section className="rounded-lg border border-slate-200 bg-white p-5 space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="font-display text-base font-bold text-slate-900">
-                My Assigned Marksheets ({activeExam.name})
+                My Classes &amp; Deadlines ({activeExam.name})
               </h3>
-              <p className="text-xs text-slate-500">
-                Direct shortcuts to enter, validate, and submit your subject marksheets.
+              <p className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5 mt-0.5">
+                <CalendarClock className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                <span>Submission deadline:</span>
+                <span className="font-mono tabular-nums font-semibold text-slate-700">
+                  {activeExam.submissionDeadline}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span
+                  className={
+                    deadlineInfo.overdue
+                      ? 'font-semibold text-red-700'
+                      : deadlineInfo.urgent
+                        ? 'font-semibold text-amber-700'
+                        : 'text-slate-600'
+                  }
+                >
+                  {deadlineInfo.label}
+                </span>
               </p>
             </div>
             <button
               type="button"
               onClick={() => onNavigate('marks-entry')}
-              className="inline-flex items-center gap-1 text-xs font-semibold text-blue-800 hover:underline whitespace-nowrap"
+              className="inline-flex items-center gap-1 text-xs font-semibold text-blue-800 hover:underline whitespace-nowrap shrink-0"
             >
               <span>Open Marks Entry</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </button>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {myAssignedSheets.slice(0, 6).map((item) => (
-              <button
-                key={`${item.classId}-${item.subjectId}`}
-                type="button"
-                onClick={() => onSelectClassAndNavigate(item.classId, 'marks-entry')}
-                className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50/50 p-3 text-left hover:border-blue-300 hover:bg-blue-50/40 transition-colors"
-              >
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold text-slate-900 truncate">
-                    {item.className} · {item.subjectName}
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    {item.incompleteCount > 0
-                      ? `${item.incompleteCount} missing/invalid marks`
-                      : 'All student marks recorded'}
-                  </p>
-                </div>
-                <span
-                  className={`shrink-0 ml-2 rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                    item.status === 'approved' || item.status === 'published'
-                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                      : item.status === 'submitted'
-                        ? 'bg-blue-50 text-blue-800 border border-blue-200'
-                        : item.status === 'returned'
-                          ? 'bg-red-50 text-red-800 border border-red-200'
-                          : 'bg-amber-50 text-amber-800 border border-amber-200'
-                  }`}
-                >
-                  {item.status === 'missing_sheet' ? 'Pending' : item.status}
-                </span>
-              </button>
-            ))}
-          </div>
+
+          {myAssignedSheets.length === 0 ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600">
+              No subject marksheets are currently mapped to your account for {activeExam.name}. Ask your Director of Studies to assign your classes and subjects under Classes or Staff Accounts.
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-200 border border-slate-200 rounded-md overflow-hidden">
+              {myAssignedSheets.map((item) => {
+                const isDone =
+                  item.status === 'submitted' ||
+                  item.status === 'approved' ||
+                  item.status === 'published';
+                const isReturned = item.status === 'returned';
+                return (
+                  <div
+                    key={`${item.classId}-${item.subjectId}`}
+                    className="flex flex-wrap items-center justify-between gap-3 bg-white px-4 py-3 hover:bg-slate-50/70 transition-colors"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-semibold text-slate-900">
+                          {item.className} · {item.subjectName}
+                        </span>
+                        <span aria-hidden="true" className="text-slate-300">
+                          ·
+                        </span>
+                        <span className="font-mono tabular-nums text-[11px] text-slate-600">
+                          {item.completedCount}/{item.totalStudents} recorded
+                        </span>
+                        <span aria-hidden="true" className="text-slate-300">
+                          ·
+                        </span>
+                        <span
+                          className={`text-[11px] font-semibold uppercase ${
+                            isReturned
+                              ? 'text-red-700'
+                              : isDone
+                                ? 'text-emerald-700'
+                                : deadlineInfo.overdue
+                                  ? 'text-red-700'
+                                  : 'text-amber-700'
+                          }`}
+                        >
+                          {item.status === 'missing_sheet'
+                            ? deadlineInfo.overdue
+                              ? 'Overdue · Not Started'
+                              : 'Not Started'
+                            : item.status}
+                        </span>
+                      </div>
+
+                      {isReturned && item.dosComment && (
+                        <p className="text-[11px] text-red-700 flex items-start gap-1.5">
+                          <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" aria-hidden="true" />
+                          <span>DOS Comment: {item.dosComment}</span>
+                        </p>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onSelectClassAndNavigate(item.classId, 'marks-entry', item.subjectId)
+                      }
+                      className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-800 hover:bg-slate-100 whitespace-nowrap shrink-0"
+                    >
+                      <span>{isDone ? 'View Sheet' : isReturned ? 'Fix & Resubmit' : 'Enter Marks'}</span>
+                      <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </section>
       )}
 

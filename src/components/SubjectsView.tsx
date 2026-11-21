@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { BookOpen, Plus } from 'lucide-react';
+import { Archive, ArchiveRestore, BookOpen, Plus, Trash2 } from 'lucide-react';
 import type {
   CurriculumScope,
   EducationLevel,
@@ -15,6 +15,7 @@ interface SubjectsViewProps {
   curriculumScope?: CurriculumScope;
   onAddSubject: (subject: SubjectDefinition) => void;
   onUpdateSubject: (subject: SubjectDefinition) => void;
+  onArchiveOrDeleteSubject?: (subjectId: string, mode: 'archive' | 'restore' | 'delete') => void;
 }
 
 export function SubjectsView({
@@ -23,12 +24,14 @@ export function SubjectsView({
   curriculumScope = 'olevel_alevel',
   onAddSubject,
   onUpdateSubject,
+  onArchiveOrDeleteSubject,
 }: SubjectsViewProps) {
   const canEdit = canManageAcademicSetup(userRole);
   const allowOlevel = curriculumScope !== 'alevel_only';
   const allowAlevel = curriculumScope !== 'olevel_only';
 
   const [levelFilter, setLevelFilter] = useState<'all' | EducationLevel>('all');
+  const [showArchived, setShowArchived] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
@@ -42,8 +45,8 @@ export function SubjectsView({
   const [passMark, setPassMark] = useState(50);
   const [competencyText, setCompetencyText] = useState('');
 
-  const scopedSubjects = subjects.filter((s) =>
-    s.level === 'olevel' ? allowOlevel : allowAlevel
+  const scopedSubjects = subjects.filter(
+    (s) => (s.level === 'olevel' ? allowOlevel : allowAlevel) && (showArchived || !s.archived)
   );
   const filtered = scopedSubjects.filter((s) => levelFilter === 'all' || s.level === levelFilter);
 
@@ -115,7 +118,15 @@ export function SubjectsView({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer mr-1">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            <span>Show Archived</span>
+          </label>
           {allowOlevel && allowAlevel && (
             <div className="flex items-center gap-1 p-1 rounded-md bg-slate-100 border border-slate-200 text-xs">
               {(
@@ -281,7 +292,14 @@ export function SubjectsView({
                 <div className="flex items-center gap-2">
                   <BookOpen className="h-4 w-4 text-blue-800 shrink-0" />
                   <div>
-                    <h3 className="font-display text-sm font-bold text-slate-900">{sub.name}</h3>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-display text-sm font-bold text-slate-900">{sub.name}</h3>
+                      {sub.archived && (
+                        <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">
+                          Archived
+                        </span>
+                      )}
+                    </div>
                     <p className="text-[11px] text-slate-500 font-mono">
                       {sub.code} · {sub.level === 'olevel' ? "O'Level CBC" : "A'Level"} ·{' '}
                       <span className="capitalize font-sans">{sub.category}</span>
@@ -289,13 +307,41 @@ export function SubjectsView({
                   </div>
                 </div>
                 {canEdit && (
-                  <button
-                    type="button"
-                    onClick={() => openEdit(sub)}
-                    className="rounded border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-blue-800 hover:bg-blue-50"
-                  >
-                    Edit
-                  </button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => openEdit(sub)}
+                      className="rounded border border-slate-200 px-2 py-0.5 text-[11px] font-medium text-blue-800 hover:bg-blue-50"
+                    >
+                      Edit
+                    </button>
+                    {onArchiveOrDeleteSubject && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onArchiveOrDeleteSubject(sub.id, sub.archived ? 'restore' : 'archive')
+                          }
+                          title={sub.archived ? 'Restore subject' : 'Archive subject'}
+                          className="rounded border border-slate-200 p-1 text-slate-500 hover:bg-slate-50"
+                        >
+                          {sub.archived ? (
+                            <ArchiveRestore className="h-3.5 w-3.5 text-emerald-700" />
+                          ) : (
+                            <Archive className="h-3.5 w-3.5 text-amber-700" />
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onArchiveOrDeleteSubject(sub.id, 'delete')}
+                          title="Delete subject (only if no marksheets exist)"
+                          className="rounded border border-slate-200 p-1 text-slate-400 hover:text-red-700 hover:border-red-200"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
 

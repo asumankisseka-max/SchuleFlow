@@ -6,18 +6,31 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  ConflictError,
+  PermissionError,
+  ValidationAppError,
   addStudentsWithQuotaCheck,
+  archiveOrDeleteTenantClass,
+  archiveOrDeleteTenantExam,
+  archiveOrDeleteTenantSubject,
   bulkPromoteTenantStudents,
   bulkUpsertTenantStaff,
   deleteSchoolTenant,
   deleteTenantCombination,
+  deleteTenantStudent,
+  generateTermlyInvoiceForSchool,
+  getSchoolMediaStorageSummary,
   getSchoolSubscriptionOverview,
   getTenantDatabase,
   incrementTenantReportsGenerated,
   listAllSchoolsWithStats,
   listPlatformAuditLogs,
+  migrateSchoolMediaToSupabase,
   publishAllApprovedTenantMarksheets,
+  queryTenantMarksheetsFiltered,
+  queryTenantStudentsPaginated,
   recordAuditLog,
+  resetTenantStaffPasswordByAdmin,
   updateSchoolSubscription,
   updateTenantSettingsAndGrading,
   updateTenantStudent,
@@ -37,12 +50,32 @@ import {
 import {
   AuthValidationError,
   authenticateWithCredentials,
+  changeAuthenticatedUserPassword,
   lookupRecoverableAccount,
   lookupSchoolByCode,
   resetPasswordWithRecoveryToken,
   verifyRecoveryIdentity,
 } from './src/db/users.ts';
 import { signSessionToken, verifyRecoveryToken } from './src/lib/passwordAuth.ts';
+import { uploadMediaToSupabase } from './src/lib/supabaseStorage.ts';
+import {
+  bulkStaffSchema,
+  changePasswordSchema,
+  combinationSchema,
+  createStudentsBodySchema,
+  examSchema,
+  loginSchema,
+  marksheetSchema,
+  mediaUploadSchema,
+  onboardSchoolSchema,
+  parseWithSchema,
+  promoteStudentsSchema,
+  remarkSchema,
+  staffSchema,
+  streamClassPayloadSchema,
+  studentProfileSchema,
+  subjectSchema,
+} from './src/lib/validationSchemas.ts';
 import {
   SESSION_COOKIE_NAME,
   checkSchoolSubscriptionGate,
@@ -51,6 +84,11 @@ import {
   requireSuperAdmin,
   type AuthRequest,
 } from './src/middleware/auth.ts';
+import {
+  loginRateLimiter,
+  lookupRateLimiter,
+  recoveryRateLimiter,
+} from './src/middleware/rateLimit.ts';
 import {
   requireTenantScope,
   requireTenantScopeWithOptions,
@@ -61,7 +99,6 @@ import type {
   SchoolSettings,
   StreamClass,
   StudentProfile,
-  StudentTermRemarks,
   SubjectCombination,
   SubjectDefinition,
   UserAccount,
@@ -75,7 +112,7 @@ app.use(express.json({ limit: '10mb' }));
   /* ------------------------------------------------------------------------ */
   /* Auth & Session Context Routes (Pure PostgreSQL + HttpOnly Cookie/Bearer) */
   /* ------------------------------------------------------------------------ */
-  app.get('/api/v1/auth/school-lookup', async (req, res) => {
+  app.get('/api/v1/auth/school-lookup', lookupRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
       const rawCode = typeof req.query.code === 'string' ? req.query.code.trim() : '';
@@ -93,47 +130,26 @@ app.use(express.json({ limit: '10mb' }));
     }
   });
 
-  app.post('/api/v1/auth/login', async (req, res) => {
+  app.post('/api/v1/auth/login', loginRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
 
-      const { schoolCode, identifier, password, mode } = req.body as {
-        schoolCode?: string;
-        identifier?: string;
-        password?: string;
-        mode?: 'school' | 'super_admin';
-      };
-
-      const resolvedMode: 'school' | 'super_admin' = mode === 'super_admin' ? 'super_admin' : 'school';
-
-      if (resolvedMode === 'school' && !schoolCode?.trim()) {
-        return res.status(400).json({
-          error: 'School Code is required for school staff login.',
-        });
+      const parsed = parseWithSchema(loginSchema, req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
       }
 
-      if (!identifier?.trim() || !password) {
-        return res.status(400).json({
-          error:
-            resolvedMode === 'super_admin'
-              ? 'Super Admin email and password are required.'
-              : 'Staff ID or email and password are required.',
-        });
-      }
+      const { schoolCode, identifier, password } = parsed.data;
 
       const dbUser = await authenticateWithCredentials({
-        schoolCode,
+        schoolCode: schoolCode?.trim() ? schoolCode : undefined,
         identifier,
         password,
-        mode: resolvedMode,
       });
 
       if (!dbUser) {
         return res.status(401).json({
-          error:
-            resolvedMode === 'super_admin'
-              ? 'Invalid Platform Super Admin email or password.'
-              : 'Invalid Staff ID / email or personal password for this school.',
+          error: 'Invalid login credentials. Check your ID/email and password.',
         });
       }
 
@@ -197,7 +213,10 @@ app.use(express.json({ limit: '10mb' }));
       });
     } catch (error: unknown) {
       if (error instanceof AuthValidationError) {
-        return res.status(error.status).json({ error: error.message });
+        return res.status(error.status).json({
+          error: error.message,
+          ...(error.code ? { code: error.code } : {}),
+        });
       }
       const message = error instanceof Error ? error.message : 'Login failed.';
       const status = message.includes('deactivated') ? 403 : 500;
@@ -238,7 +257,62 @@ app.use(express.json({ limit: '10mb' }));
     }
   });
 
-  app.post('/api/v1/auth/recover/lookup', async (req, res) => {
+  app.post('/api/v1/auth/change-password', requireAuth, async (req: AuthRequest, res) => {
+    try {
+      const parsed = parseWithSchema(changePasswordSchema, req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+
+      const dbUser = req.dbUser!;
+      const updatedUser = await changeAuthenticatedUserPassword({
+        uid: dbUser.uid,
+        email: dbUser.email,
+        schoolId: dbUser.globalRole === 'super_admin' ? null : dbUser.schoolId,
+        currentPassword: parsed.data.currentPassword,
+        newPassword: parsed.data.newPassword,
+      });
+
+      const refreshedToken = signSessionToken({
+        userId: updatedUser.userId,
+        uid: updatedUser.uid,
+        staffId: updatedUser.staffId,
+        email: updatedUser.email,
+        name: updatedUser.name,
+        globalRole: updatedUser.globalRole,
+        schoolId: updatedUser.globalRole === 'super_admin' ? null : updatedUser.schoolId,
+        role: updatedUser.schoolRole,
+        schoolRole: updatedUser.schoolRole,
+      });
+
+      res.cookie(SESSION_COOKIE_NAME, refreshedToken, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        path: '/',
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+      });
+
+      await recordAuditLog({
+        userId: updatedUser.uid,
+        userEmail: updatedUser.email,
+        userRole: updatedUser.globalRole === 'super_admin' ? 'super_admin' : updatedUser.schoolRole,
+        schoolId: updatedUser.globalRole === 'super_admin' ? null : updatedUser.schoolId,
+        action: 'PASSWORD_CHANGED',
+        details: `${updatedUser.name} updated their personal account password.`,
+      });
+
+      res.json({ token: refreshedToken, user: updatedUser });
+    } catch (error: unknown) {
+      if (error instanceof AuthValidationError) {
+        return res.status(error.status).json({ error: error.message });
+      }
+      const message = error instanceof Error ? error.message : 'Failed to update password.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.post('/api/v1/auth/recover/lookup', recoveryRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
       const { identifier, schoolCode, fullName } = req.body as {
@@ -268,7 +342,7 @@ app.use(express.json({ limit: '10mb' }));
     }
   });
 
-  app.post('/api/v1/auth/recover/verify', async (req, res) => {
+  app.post('/api/v1/auth/recover/verify', recoveryRateLimiter, async (req, res) => {
     try {
       const { recoveryToken, verification } = req.body as {
         recoveryToken?: string;
@@ -304,7 +378,7 @@ app.use(express.json({ limit: '10mb' }));
     }
   });
 
-  app.post('/api/v1/auth/recover/reset-password', async (req, res) => {
+  app.post('/api/v1/auth/recover/reset-password', recoveryRateLimiter, async (req, res) => {
     try {
       const { resetToken, newPassword } = req.body as {
         resetToken?: string;
@@ -339,12 +413,13 @@ app.use(express.json({ limit: '10mb' }));
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Failed to reset password.';
-      const status = message.includes('at least 6') ? 400 : 500;
+      const status =
+        message.includes('at least') || message.includes('must include') ? 400 : 500;
       res.status(status).json({ error: message });
     }
   });
 
-  app.post('/api/v1/auth/recover/request-admin', async (req, res) => {
+  app.post('/api/v1/auth/recover/request-admin', recoveryRateLimiter, async (req, res) => {
     try {
       const { recoveryToken, note } = req.body as {
         recoveryToken?: string;
@@ -396,12 +471,11 @@ app.use(express.json({ limit: '10mb' }));
     requireSuperAdmin,
     async (req: AuthRequest, res) => {
       try {
-        const body = req.body as OnboardSchoolInput;
-        if (!body.name || !body.subdomain || !body.adminEmail || !body.adminName) {
-          return res.status(400).json({
-            error: 'School name, subdomain, and primary School Administrator details are required.',
-          });
+        const parsed = parseWithSchema(onboardSchoolSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
         }
+        const body = parsed.data as OnboardSchoolInput;
         const created = await provisionNewSchoolTenant(body);
         await recordAuditLog({
           userId: req.dbUser!.uid,
@@ -414,6 +488,31 @@ app.use(express.json({ limit: '10mb' }));
         res.status(201).json({ school: created });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to onboard school.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/platform/schools/:targetSchoolId/invoices/generate',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const { targetSchoolId } = req.params;
+        const invoice = await generateTermlyInvoiceForSchool(targetSchoolId);
+        await recordAuditLog({
+          userId: req.dbUser!.uid,
+          userEmail: req.dbUser!.email,
+          userRole: 'super_admin',
+          schoolId: targetSchoolId,
+          action: 'TERM_INVOICE_ISSUED',
+          details: `Issued ${invoice.termName} ${invoice.academicYear} invoice (${invoice.id}) for ${invoice.activeStudentsCount} active students (UGX ${invoice.totalAmountUgx.toLocaleString()}).`,
+        });
+        res.status(201).json({ invoice });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to generate term invoice.';
         res.status(400).json({ error: message });
       }
     }
@@ -512,6 +611,28 @@ app.use(express.json({ limit: '10mb' }));
     }
   );
 
+  app.get(
+    '/api/v1/schools/:schoolId/students',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher', 'class_teacher', 'teacher', 'bursar'),
+    async (req: AuthRequest, res) => {
+      try {
+        const result = await queryTenantStudentsPaginated(req.schoolId!, {
+          page: req.query.page ? Number(req.query.page) : 1,
+          limit: req.query.limit ? Number(req.query.limit) : 50,
+          classId: typeof req.query.classId === 'string' ? req.query.classId : undefined,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
+          search: typeof req.query.search === 'string' ? req.query.search : undefined,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to query students.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
   app.post(
     '/api/v1/schools/:schoolId/students',
     requireAuth,
@@ -519,9 +640,14 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(createStudentsBodySchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const schoolId = req.schoolId!;
-        const payload = req.body as { students?: StudentProfile[]; student?: StudentProfile };
-        const items = payload.students ?? (payload.student ? [payload.student] : []);
+        const items = (
+          parsed.data.students ?? (parsed.data.student ? [parsed.data.student] : [])
+        ) as StudentProfile[];
         const saved = await addStudentsWithQuotaCheck(schoolId, items);
         res.status(201).json({ students: saved });
       } catch (error: unknown) {
@@ -536,18 +662,40 @@ app.use(express.json({ limit: '10mb' }));
     '/api/v1/schools/:schoolId/students/:studentId',
     requireAuth,
     requireTenantScope,
-    requireRoles('school_admin', 'dos', 'headteacher', 'bursar'),
+    requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
-        const schoolId = req.schoolId!;
-        const stu = req.body as StudentProfile;
-        const updated = await updateTenantStudent(schoolId, {
-          ...stu,
+        const parsed = parseWithSchema(studentProfileSchema, {
+          ...(req.body as Record<string, unknown>),
           id: req.params.studentId,
         });
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const schoolId = req.schoolId!;
+        const updated = await updateTenantStudent(schoolId, parsed.data as StudentProfile);
         res.json({ student: updated });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to update student.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/v1/schools/:schoolId/students/:studentId',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        await deleteTenantStudent(req.schoolId!, req.params.studentId);
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message = error instanceof Error ? error.message : 'Failed to delete student.';
         res.status(500).json({ error: message });
       }
     }
@@ -560,12 +708,16 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(promoteStudentsSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const schoolId = req.schoolId!;
-        const { studentIds, targetClassId } = req.body as {
-          studentIds: string[];
-          targetClassId: string;
-        };
-        await bulkPromoteTenantStudents(schoolId, studentIds ?? [], targetClassId);
+        await bulkPromoteTenantStudents(
+          schoolId,
+          parsed.data.studentIds,
+          parsed.data.targetClassId
+        );
         res.json({ ok: true });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to promote students.';
@@ -578,18 +730,45 @@ app.use(express.json({ limit: '10mb' }));
     '/api/v1/schools/:schoolId/classes',
     requireAuth,
     requireTenantScope,
-    requireRoles('school_admin', 'dos'),
+    requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(streamClassPayloadSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const schoolId = req.schoolId!;
-        const { cls, attachToExamId } = req.body as {
-          cls: StreamClass;
-          attachToExamId?: string;
-        };
-        await upsertTenantClass(schoolId, cls, attachToExamId);
-        res.json({ cls });
+        const cls = parsed.data.cls as StreamClass;
+        const savedCls = await upsertTenantClass(schoolId, cls, parsed.data.attachToExamId);
+        res.json({ cls: savedCls });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to save class.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/v1/schools/:schoolId/classes/:classId',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const rawMode = typeof req.query.mode === 'string' ? req.query.mode : 'delete';
+        const mode =
+          rawMode === 'archive' || rawMode === 'restore' ? rawMode : 'delete';
+        const result = await archiveOrDeleteTenantClass(
+          req.schoolId!,
+          req.params.classId,
+          mode
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message = error instanceof Error ? error.message : 'Failed to update class.';
         res.status(500).json({ error: message });
       }
     }
@@ -599,11 +778,15 @@ app.use(express.json({ limit: '10mb' }));
     '/api/v1/schools/:schoolId/subjects',
     requireAuth,
     requireTenantScope,
-    requireRoles('school_admin', 'dos'),
+    requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(subjectSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const schoolId = req.schoolId!;
-        const sub = req.body as SubjectDefinition;
+        const sub = parsed.data as SubjectDefinition;
         await upsertTenantSubject(schoolId, sub);
         res.json({ subject: sub });
       } catch (error: unknown) {
@@ -613,15 +796,45 @@ app.use(express.json({ limit: '10mb' }));
     }
   );
 
+  app.delete(
+    '/api/v1/schools/:schoolId/subjects/:subjectId',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const rawMode = typeof req.query.mode === 'string' ? req.query.mode : 'delete';
+        const mode =
+          rawMode === 'archive' || rawMode === 'restore' ? rawMode : 'delete';
+        const result = await archiveOrDeleteTenantSubject(
+          req.schoolId!,
+          req.params.subjectId,
+          mode
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message = error instanceof Error ? error.message : 'Failed to update subject.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
   app.put(
     '/api/v1/schools/:schoolId/combinations',
     requireAuth,
     requireTenantScope,
-    requireRoles('school_admin', 'dos'),
+    requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(combinationSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const schoolId = req.schoolId!;
-        const combo = req.body as SubjectCombination;
+        const combo = parsed.data as SubjectCombination;
         await upsertTenantCombination(schoolId, combo);
         res.json({ combination: combo });
       } catch (error: unknown) {
@@ -635,7 +848,7 @@ app.use(express.json({ limit: '10mb' }));
     '/api/v1/schools/:schoolId/combinations/:comboId',
     requireAuth,
     requireTenantScope,
-    requireRoles('school_admin', 'dos'),
+    requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
         await deleteTenantCombination(req.schoolId!, req.params.comboId);
@@ -654,11 +867,64 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
-        const ex = req.body as ExaminationPeriod;
+        const parsed = parseWithSchema(examSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const ex = parsed.data as ExaminationPeriod;
         await upsertTenantExam(req.schoolId!, ex);
         res.json({ exam: ex });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to save examination.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/v1/schools/:schoolId/examinations/:examId',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const rawMode = typeof req.query.mode === 'string' ? req.query.mode : 'delete';
+        const mode =
+          rawMode === 'archive' || rawMode === 'restore' ? rawMode : 'delete';
+        const result = await archiveOrDeleteTenantExam(
+          req.schoolId!,
+          req.params.examId,
+          mode
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message = error instanceof Error ? error.message : 'Failed to update examination.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.get(
+    '/api/v1/schools/:schoolId/marksheets',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('teacher', 'class_teacher', 'dos', 'headteacher', 'school_admin'),
+    async (req: AuthRequest, res) => {
+      try {
+        const result = await queryTenantMarksheetsFiltered(req.schoolId!, {
+          examId: typeof req.query.examId === 'string' ? req.query.examId : undefined,
+          classId: typeof req.query.classId === 'string' ? req.query.classId : undefined,
+          subjectId: typeof req.query.subjectId === 'string' ? req.query.subjectId : undefined,
+          status: typeof req.query.status === 'string' ? req.query.status : undefined,
+          page: req.query.page ? Number(req.query.page) : 1,
+          limit: req.query.limit ? Number(req.query.limit) : 100,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to load marksheets.';
         res.status(500).json({ error: message });
       }
     }
@@ -671,10 +937,26 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('teacher', 'class_teacher', 'dos', 'headteacher', 'school_admin'),
     async (req: AuthRequest, res) => {
       try {
-        const ms = req.body as MarksheetRecord;
-        await upsertTenantMarksheet(req.schoolId!, ms);
-        res.json({ marksheet: ms });
+        const parsed = parseWithSchema(marksheetSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const dbUser = req.dbUser!;
+        const saved = await upsertTenantMarksheet(
+          req.schoolId!,
+          parsed.data as MarksheetRecord,
+          {
+            uid: dbUser.uid,
+            email: dbUser.email,
+            staffId: dbUser.staffId,
+            role: dbUser.schoolRole,
+          }
+        );
+        res.json({ marksheet: saved });
       } catch (error: unknown) {
+        if (error instanceof ConflictError || error instanceof PermissionError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to save marksheet.';
         res.status(500).json({ error: message });
       }
@@ -709,15 +991,29 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('class_teacher', 'dos', 'headteacher', 'school_admin'),
     async (req: AuthRequest, res) => {
       try {
-        const { examId, studentId, field, value } = req.body as {
-          examId: string;
-          studentId: string;
-          field: keyof StudentTermRemarks;
-          value: string;
-        };
-        await upsertTenantStudentRemark(req.schoolId!, examId, studentId, field, value);
+        const parsed = parseWithSchema(remarkSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const dbUser = req.dbUser!;
+        await upsertTenantStudentRemark(
+          req.schoolId!,
+          parsed.data.examId,
+          parsed.data.studentId,
+          parsed.data.field,
+          parsed.data.value,
+          {
+            uid: dbUser.uid,
+            email: dbUser.email,
+            staffId: dbUser.staffId,
+            role: dbUser.schoolRole,
+          }
+        );
         res.json({ ok: true });
       } catch (error: unknown) {
+        if (error instanceof PermissionError || error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to save remark.';
         res.status(500).json({ error: message });
       }
@@ -751,8 +1047,14 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('school_admin'),
     async (req: AuthRequest, res) => {
       try {
-        const staff = req.body as UserAccount;
-        const saved = await upsertTenantStaffMember(req.schoolId!, staff);
+        const parsed = parseWithSchema(staffSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const saved = await upsertTenantStaffMember(
+          req.schoolId!,
+          parsed.data as UserAccount
+        );
         await recordAuditLog({
           userId: req.dbUser!.uid,
           userEmail: req.dbUser!.email,
@@ -776,8 +1078,14 @@ app.use(express.json({ limit: '10mb' }));
     requireRoles('school_admin'),
     async (req: AuthRequest, res) => {
       try {
-        const { staff } = req.body as { staff: UserAccount[] };
-        const saved = await bulkUpsertTenantStaff(req.schoolId!, staff ?? []);
+        const parsed = parseWithSchema(bulkStaffSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const saved = await bulkUpsertTenantStaff(
+          req.schoolId!,
+          parsed.data.staff as UserAccount[]
+        );
         await recordAuditLog({
           userId: req.dbUser!.uid,
           userEmail: req.dbUser!.email,
@@ -791,6 +1099,109 @@ app.use(express.json({ limit: '10mb' }));
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to import staff accounts.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/staff/:staffRowId/reset-password',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin'),
+    async (req: AuthRequest, res) => {
+      try {
+        const { temporaryPassword } = (req.body ?? {}) as { temporaryPassword?: string };
+        const result = await resetTenantStaffPasswordByAdmin(
+          req.schoolId!,
+          req.params.staffRowId,
+          temporaryPassword
+        );
+        await recordAuditLog({
+          userId: req.dbUser!.uid,
+          userEmail: req.dbUser!.email,
+          userRole: req.dbUser!.schoolRole,
+          schoolId: req.schoolId!,
+          action: 'STAFF_PASSWORD_ADMIN_RESET',
+          details: `Administrator reset password for ${result.name} (${result.staffId ?? result.email}). Password change forced on next sign-in.`,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message =
+          error instanceof Error ? error.message : 'Failed to reset staff password.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.get(
+    '/api/v1/schools/:schoolId/media/status',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher', 'class_teacher', 'teacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const summary = await getSchoolMediaStorageSummary(req.schoolId!);
+        res.json(summary);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to inspect media storage status.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/media/upload',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher', 'class_teacher', 'teacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const parsed = parseWithSchema(mediaUploadSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const uploaded = await uploadMediaToSupabase({
+          schoolId: req.schoolId!,
+          folder: parsed.data.folder,
+          entityId: parsed.data.entityId,
+          dataUrl: parsed.data.dataUrl,
+        });
+        res.status(201).json(uploaded);
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to upload media file.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/media/migrate',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('school_admin', 'dos', 'headteacher'),
+    async (req: AuthRequest, res) => {
+      try {
+        const result = await migrateSchoolMediaToSupabase(req.schoolId!);
+        await recordAuditLog({
+          userId: req.dbUser!.uid,
+          userEmail: req.dbUser!.email,
+          userRole: req.dbUser!.schoolRole,
+          schoolId: req.schoolId!,
+          action: 'MEDIA_MIGRATED_TO_SUPABASE',
+          details: `Migrated ${result.migratedLogos} logo(s) and ${result.migratedPhotos} student photo(s) to Supabase Storage.`,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message =
+          error instanceof Error ? error.message : 'Failed to migrate school media.';
         res.status(500).json({ error: message });
       }
     }
@@ -914,6 +1325,10 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  await ensureInitialTenantsSeeded().catch((err) => {
+    console.error('Startup database seed warning:', err);
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`SchuleFlow multi-tenant server listening on http://0.0.0.0:${PORT}`);

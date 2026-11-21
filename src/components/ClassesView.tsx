@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Layers, Plus, Trash2, Users } from 'lucide-react';
+import { Archive, ArchiveRestore, Layers, Plus, Trash2, Users } from 'lucide-react';
 import type {
   CurriculumScope,
   EducationLevel,
@@ -22,6 +22,7 @@ interface ClassesViewProps {
   curriculumScope?: CurriculumScope;
   onAddClass: (cls: StreamClass) => void;
   onUpdateClass: (cls: StreamClass) => void;
+  onArchiveOrDeleteClass?: (classId: string, mode: 'archive' | 'restore' | 'delete') => void;
   onAddCombination: (combo: SubjectCombination) => void;
   onDeleteCombination: (comboId: string) => void;
 }
@@ -36,16 +37,21 @@ export function ClassesView({
   curriculumScope = 'olevel_alevel',
   onAddClass,
   onUpdateClass,
+  onArchiveOrDeleteClass,
   onAddCombination,
   onDeleteCombination,
 }: ClassesViewProps) {
   const canEdit = canManageAcademicSetup(userRole);
   const allowOlevel = curriculumScope !== 'alevel_only';
   const allowAlevel = curriculumScope !== 'olevel_only';
+  const [showArchived, setShowArchived] = useState(false);
 
   const visibleClasses = useMemo(
-    () => classes.filter((c) => (c.level === 'olevel' ? allowOlevel : allowAlevel)),
-    [classes, allowOlevel, allowAlevel]
+    () =>
+      classes.filter(
+        (c) => (c.level === 'olevel' ? allowOlevel : allowAlevel) && (showArchived || !c.archived)
+      ),
+    [classes, allowOlevel, allowAlevel, showArchived]
   );
 
   const allowedGrades = useMemo(() => {
@@ -208,19 +214,29 @@ export function ClassesView({
             teachers, subject offerings, and subject teacher assignments
           </p>
         </div>
-        {canEdit && (
-          <button
-            type="button"
-            onClick={() => {
-              setClassFormError(null);
-              setShowNewClass((v) => !v);
-            }}
-            className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
-          >
-            <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>Add Class</span>
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer mr-1">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            <span>Show Archived</span>
+          </label>
+          {canEdit && (
+            <button
+              type="button"
+              onClick={() => {
+                setClassFormError(null);
+                setShowNewClass((v) => !v);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Add Class</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {showNewClass && canEdit && (
@@ -353,9 +369,16 @@ export function ClassesView({
           <div className="lg:col-span-8 rounded-lg border border-slate-200 bg-white p-5 space-y-5">
             <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
               <div>
-                <h3 className="font-display text-base font-bold text-slate-900">
-                  {activeClass.name} Configuration
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="font-display text-base font-bold text-slate-900">
+                    {activeClass.name} Configuration
+                  </h3>
+                  {activeClass.archived && (
+                    <span className="rounded border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                      Archived
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-slate-500">
                   {activeClass.level === 'olevel'
                     ? "Lower Secondary O'Level Competency-Based Curriculum"
@@ -363,6 +386,43 @@ export function ClassesView({
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3 text-xs">
+                {canEdit && onArchiveOrDeleteClass && (
+                  <div className="flex items-center gap-1.5 pt-4">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onArchiveOrDeleteClass(
+                          activeClass.id,
+                          activeClass.archived ? 'restore' : 'archive'
+                        )
+                      }
+                      className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                      {activeClass.archived ? (
+                        <>
+                          <ArchiveRestore className="h-3.5 w-3.5 text-emerald-700" />
+                          <span>Restore</span>
+                        </>
+                      ) : (
+                        <>
+                          <Archive className="h-3.5 w-3.5 text-amber-700" />
+                          <span>Archive</span>
+                        </>
+                      )}
+                    </button>
+                    {students.filter((s) => s.classId === activeClass.id).length === 0 && (
+                      <button
+                        type="button"
+                        onClick={() => onArchiveOrDeleteClass(activeClass.id, 'delete')}
+                        title="Delete empty class"
+                        className="inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        <span>Delete</span>
+                      </button>
+                    )}
+                  </div>
+                )}
                 <div>
                   <label className="block text-slate-500 mb-1">Stream (Optional)</label>
                   <input

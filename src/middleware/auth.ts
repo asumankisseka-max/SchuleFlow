@@ -4,7 +4,7 @@ import { db } from '../db/index.ts';
 import { schools } from '../db/schema.ts';
 import { ensureInitialTenantsSeeded } from '../db/seed.ts';
 import { getUserProfileByUid } from '../db/users.ts';
-import { verifySessionToken } from '../lib/passwordAuth.ts';
+import { isLocalSessionToken, verifySessionToken } from '../lib/passwordAuth.ts';
 import type { AuthSessionProfile, GlobalRole, SchoolTenant, UserRole } from '../types.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
 
@@ -114,12 +114,21 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
   try {
     await ensureInitialTenantsSeeded();
 
+    if (!isLocalSessionToken(token)) {
+      return res.status(401).json({ error: 'Unauthorized: Session expired. Please sign in again.' });
+    }
+
     const session = verifySessionToken(token);
     if (!session) {
       return res.status(401).json({ error: 'Unauthorized: Session expired. Please sign in again.' });
     }
 
     const dbUser = await getUserProfileByUid(session.uid);
+    const sessionSchoolId = session.schoolId;
+    const sessionUserId = session.userId;
+    const sessionStaffId = session.staffId;
+    const sessionRole = session.role;
+
     if (!dbUser) {
       return res.status(401).json({ error: 'Unauthorized: User account no longer exists.' });
     }
@@ -133,7 +142,7 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     // Strict school binding check between verified token and PostgreSQL record
     if (
       dbUser.globalRole !== 'super_admin' &&
-      session.schoolId !== dbUser.schoolId
+      sessionSchoolId !== dbUser.schoolId
     ) {
       return res.status(403).json({
         error: 'Session tenant mismatch detected. Please sign in again.',
@@ -152,11 +161,11 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     }
 
     req.user = {
-      userId: session.userId ?? dbUser.userId,
+      userId: sessionUserId ?? dbUser.userId,
       uid: dbUser.uid,
-      staffId: session.staffId ?? dbUser.staffId,
-      schoolId: dbUser.globalRole === 'super_admin' ? null : session.schoolId,
-      role: normalizeUserRole(session.role ?? dbUser.schoolRole),
+      staffId: sessionStaffId ?? dbUser.staffId,
+      schoolId: dbUser.globalRole === 'super_admin' ? null : sessionSchoolId,
+      role: normalizeUserRole(sessionRole ?? dbUser.schoolRole),
       globalRole: dbUser.globalRole,
     };
     req.dbUser = dbUser;

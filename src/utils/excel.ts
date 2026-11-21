@@ -4,6 +4,7 @@ import type {
   EducationLevel,
   ExamClass,
   MarkEntryItem,
+  SchoolDatabase,
   SchoolSettings,
   StreamClass,
   StudentProfile,
@@ -611,4 +612,226 @@ export function exportClassResultsWorkbook(
     .replace(/[^a-zA-Z0-9]+/g, '_')
     .replace(/^_|_$/g, '');
   XLSX.writeFile(wb, `${safeFile}_Results_Summary.xlsx`);
+}
+
+export function exportFullSchoolExcelArchive(
+  db: SchoolDatabase,
+  schoolCode?: string
+): void {
+  const wb = XLSX.utils.book_new();
+  const classMap = new Map(db.classes.map((c) => [c.id, c]));
+  const comboMap = new Map(db.combinations.map((c) => [c.id, c]));
+  const userMap = new Map(db.users.map((u) => [u.id, u]));
+  const examMap = new Map(db.exams.map((e) => [e.id, e]));
+  const subjectMap = new Map(db.subjects.map((s) => [s.id, s]));
+
+  // Sheet 1: School Profile
+  const profileSheet = XLSX.utils.aoa_to_sheet([
+    ['SchuleFlow School Data Archive'],
+    ['Generated At', new Date().toISOString()],
+    ['School Code', schoolCode ?? '—'],
+    ['School Name', db.settings.schoolName],
+    ['Academic Year', db.settings.academicYear],
+    ['Current Term', db.settings.termName],
+    ['Headteacher', db.settings.principalName],
+    ['Director of Studies', db.settings.dosName],
+    ['School Email', db.settings.schoolEmail],
+    ['Curriculum Scope', db.settings.curriculumScope ?? 'olevel_alevel'],
+    ['Total Students', db.students.length],
+    ['Total Staff', db.users.length],
+    ['Total Marksheets', db.marksheets.length],
+  ]);
+  profileSheet['!cols'] = [{ wch: 24 }, { wch: 42 }];
+  XLSX.utils.book_append_sheet(wb, profileSheet, 'School_Profile');
+
+  // Sheet 2: Students
+  const studentsSheet = XLSX.utils.aoa_to_sheet([
+    [
+      'Student ID',
+      'Admission No',
+      'Full Name',
+      'Gender',
+      'Date of Birth',
+      'Class',
+      'Level',
+      'Combination',
+      'Status',
+      'Parent / Guardian',
+      'Parent Contact',
+    ],
+    ...db.students.map((s) => {
+      const cls = classMap.get(s.classId);
+      const combo = s.combinationId ? comboMap.get(s.combinationId) : undefined;
+      return [
+        s.studentId || s.admissionNo,
+        s.admissionNo,
+        s.fullName,
+        s.gender,
+        s.dateOfBirth || '',
+        cls?.name || s.classId,
+        cls?.level === 'alevel' ? "A'Level" : "O'Level",
+        combo?.code || '',
+        s.status,
+        s.parentName || '',
+        s.parentContact || '',
+      ];
+    }),
+  ]);
+  studentsSheet['!cols'] = [
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 24 },
+    { wch: 8 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 22 },
+    { wch: 16 },
+  ];
+  XLSX.utils.book_append_sheet(wb, studentsSheet, 'Students');
+
+  // Sheet 3: Classes
+  const classesSheet = XLSX.utils.aoa_to_sheet([
+    ['Class Name', 'Grade Level', 'Stream', 'Level', 'Class Teacher', 'Subjects Count', 'Archived'],
+    ...db.classes.map((c) => [
+      c.name,
+      c.gradeLevel,
+      c.stream || '',
+      c.level === 'alevel' ? "A'Level" : "O'Level",
+      userMap.get(c.classTeacherId)?.name || 'Unassigned',
+      c.subjectIds.length,
+      c.archived ? 'Yes' : 'No',
+    ]),
+  ]);
+  classesSheet['!cols'] = [
+    { wch: 18 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 10 },
+    { wch: 24 },
+    { wch: 15 },
+    { wch: 10 },
+  ];
+  XLSX.utils.book_append_sheet(wb, classesSheet, 'Classes');
+
+  // Sheet 4: Subjects
+  const subjectsSheet = XLSX.utils.aoa_to_sheet([
+    ['Code', 'Subject Name', 'Level', 'Category', 'Max Marks', 'Pass Mark', 'Archived'],
+    ...db.subjects.map((sub) => [
+      sub.code,
+      sub.name,
+      sub.level === 'alevel' ? "A'Level" : "O'Level",
+      sub.category,
+      sub.maxMarks,
+      sub.passMark,
+      sub.archived ? 'Yes' : 'No',
+    ]),
+  ]);
+  subjectsSheet['!cols'] = [
+    { wch: 12 },
+    { wch: 28 },
+    { wch: 10 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 10 },
+  ];
+  XLSX.utils.book_append_sheet(wb, subjectsSheet, 'Subjects');
+
+  // Sheet 5: Staff Directory
+  const staffSheet = XLSX.utils.aoa_to_sheet([
+    ['Staff ID', 'Full Name', 'Email', 'Username', 'Role', 'Status', 'Phone', 'Last Login'],
+    ...db.users.map((u) => [
+      u.staffId || '—',
+      u.name,
+      u.email,
+      u.username,
+      u.role,
+      u.active ? 'Active' : 'Deactivated',
+      u.phone || '',
+      u.lastLogin || '',
+    ]),
+  ]);
+  staffSheet['!cols'] = [
+    { wch: 16 },
+    { wch: 24 },
+    { wch: 26 },
+    { wch: 16 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 22 },
+  ];
+  XLSX.utils.book_append_sheet(wb, staffSheet, 'Staff_Directory');
+
+  // Sheet 6: Examinations
+  const examsSheet = XLSX.utils.aoa_to_sheet([
+    [
+      'Exam Name',
+      'Type',
+      'Term',
+      'Academic Year',
+      'Exam Date',
+      'Submission Deadline',
+      'Locked',
+      'Published',
+      'Archived',
+    ],
+    ...db.exams.map((ex) => [
+      ex.name,
+      ex.examType,
+      ex.term,
+      ex.academicYear,
+      ex.examDate,
+      ex.submissionDeadline,
+      ex.locked ? 'Yes' : 'No',
+      ex.published ? 'Yes' : 'No',
+      ex.archived ? 'Yes' : 'No',
+    ]),
+  ]);
+  examsSheet['!cols'] = [
+    { wch: 26 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 18 },
+    { wch: 10 },
+    { wch: 10 },
+    { wch: 10 },
+  ];
+  XLSX.utils.book_append_sheet(wb, examsSheet, 'Examinations');
+
+  // Sheet 7: Marksheets Summary
+  const sheetsSummary = XLSX.utils.aoa_to_sheet([
+    ['Exam', 'Class', 'Subject', 'Teacher', 'Status', 'Entries Count', 'Version', 'Last Modified'],
+    ...db.marksheets.map((ms) => [
+      examMap.get(ms.examId)?.name || ms.examId,
+      classMap.get(ms.classId)?.name || ms.classId,
+      subjectMap.get(ms.subjectId)?.name || ms.subjectId,
+      userMap.get(ms.teacherId)?.name || ms.teacherId || '—',
+      ms.status,
+      Object.keys(ms.entries || {}).length,
+      ms.version ?? 1,
+      ms.lastModified,
+    ]),
+  ]);
+  sheetsSummary['!cols'] = [
+    { wch: 24 },
+    { wch: 16 },
+    { wch: 22 },
+    { wch: 22 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 10 },
+    { wch: 22 },
+  ];
+  XLSX.utils.book_append_sheet(wb, sheetsSummary, 'Marksheets_Summary');
+
+  const safePrefix = (schoolCode || db.settings.schoolName || 'SchuleFlow')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_|_$/g, '');
+  XLSX.writeFile(wb, `${safePrefix}_Full_Archive_${new Date().toISOString().slice(0, 10)}.xlsx`);
 }

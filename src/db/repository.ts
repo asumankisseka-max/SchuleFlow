@@ -1,4 +1,5 @@
-import { and, desc, eq, inArray, like, ne, or, sql } from 'drizzle-orm';
+import { randomBytes } from 'node:crypto';
+import { and, desc, eq, ilike, inArray, like, ne, or, sql } from 'drizzle-orm';
 import {
   DEFAULT_ALEVEL_GRADING_SCALE,
   DEFAULT_ALEVEL_POLICY,
@@ -6,7 +7,12 @@ import {
   DEFAULT_OLEVEL_GRADING_SCALE,
   DEFAULT_REPORT_CARD_LAYOUT,
 } from '../data/sampleData.ts';
-import { hashPassword } from '../lib/passwordAuth.ts';
+import { hashPassword, validatePasswordStrength } from '../lib/passwordAuth.ts';
+import {
+  isInlineDataImageUrl,
+  isSupabaseStorageConfigured,
+  uploadMediaToSupabase,
+} from '../lib/supabaseStorage.ts';
 import type {
   AuditLogRecord,
   BillingStatus,
@@ -58,6 +64,37 @@ import {
 } from './schema.ts';
 
 type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+export class ConflictError extends Error {
+  status = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
+export class PermissionError extends Error {
+  status = 403;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PermissionError';
+  }
+}
+
+export class ValidationAppError extends Error {
+  status = 400;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationAppError';
+  }
+}
+
+export interface TenantActorContext {
+  uid: string;
+  email: string;
+  staffId?: string;
+  role: UserRole;
+}
 
 /**
  * Executes a tenant-scoped database operation inside a PostgreSQL transaction
@@ -423,6 +460,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
         password: '********',
         role: normalizeUserRole(u.role),
         active: u.active,
+        mustChangePassword: Boolean(u.mustChangePassword),
         phone: u.phone ?? undefined,
         assignedClassIds: u.assignedClassIds,
         assignedSubjectIds: u.assignedSubjectIds,
@@ -448,6 +486,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           maxMarks: s.maxMarks,
           passMark: s.passMark,
           competencies: s.competencies,
+          archived: Boolean(s.archived),
         })),
         combinations: comboRows.map((c) => ({
           id: c.id,
@@ -465,6 +504,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           classTeacherId: c.classTeacherId,
           subjectIds: c.subjectIds,
           subjectTeacherMap: c.subjectTeacherMap,
+          archived: Boolean(c.archived),
         })),
         students: studentRows.map((stu) => ({
           id: stu.id,
@@ -493,6 +533,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           submissionDeadline: e.submissionDeadline,
           locked: e.locked,
           published: e.published,
+          archived: Boolean(e.archived),
           createdAt: e.createdAt,
         })),
         marksheets: marksheetRows.map((m) => ({
@@ -508,6 +549,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           approvedAt: m.approvedAt ?? undefined,
           approvedBy: m.approvedBy ?? undefined,
           dosComment: m.dosComment ?? undefined,
+          version: m.version ?? 1,
           lastModified: m.lastModified,
           auditHistory: m.auditHistory,
         })),
@@ -669,7 +711,190 @@ export async function bulkPromoteTenantStudents(
   }
 }
 
-export async function upsertTenantClass(schoolId: string, cls: StreamClass, attachToExamId?: string) {
+export async function queryTenantStudentsPaginated(
+  schoolId: string,
+  params: {
+    page?: number;
+    limit?: number;
+    classId?: string;
+    status?: string;
+    search?: string;
+  }
+): Promise<{
+  students: StudentProfile[];
+  total: number;
+  page: number;
+  limit: number;
+}> {
+  const page = Math.max(1, Math.floor(params.page ?? 1));
+  const limit = Math.min(200, Math.max(1, Math.floor(params.limit ?? 50)));
+  const offset = (page - 1) * limit;
+
+  return withTenantScope(schoolId, async (tx) => {
+    const predicates = [eq(students.schoolId, schoolId)];
+    if (params.classId && params.classId !== 'all') {
+      predicates.push(eq(students.classId, params.classId));
+    }
+    if (params.status && params.status !== 'all') {
+      predicates.push(eq(students.status, params.status));
+    }
+    if (params.search?.trim()) {
+      const q = `%${params.search.trim()}%`;
+      predicates.push(
+        or(
+          ilike(students.fullName, q),
+          ilike(students.admissionNo, q),
+          ilike(sql`COALESCE(${students.studentId}, '')`, q)
+        )!
+      );
+    }
+
+    const whereClause = and(...predicates);
+    const [countRows, rows] = await Promise.all([
+      tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(students)
+        .where(whereClause),
+      tx.select().from(students).where(whereClause).limit(limit).offset(offset),
+    ]);
+
+    return {
+      students: rows.map((stu) => ({
+        id: stu.id,
+        studentId: stu.studentId ?? undefined,
+        admissionNo: stu.admissionNo,
+        fullName: stu.fullName,
+        gender: stu.gender as 'M' | 'F',
+        dateOfBirth: stu.dateOfBirth ?? undefined,
+        classId: stu.classId,
+        academicYear: stu.academicYear,
+        status: stu.status as StudentProfile['status'],
+        combinationId: stu.combinationId ?? undefined,
+        parentName: stu.parentName ?? undefined,
+        parentContact: stu.parentContact ?? undefined,
+        photoDataUrl: stu.photoDataUrl ?? undefined,
+      })),
+      total: countRows[0]?.count ?? 0,
+      page,
+      limit,
+    };
+  });
+}
+
+export async function queryTenantMarksheetsFiltered(
+  schoolId: string,
+  params: {
+    examId?: string;
+    classId?: string;
+    subjectId?: string;
+    status?: string;
+    page?: number;
+    limit?: number;
+  }
+): Promise<{
+  marksheets: MarksheetRecord[];
+  total: number;
+  page: number;
+  limit: number;
+}> {
+  const page = Math.max(1, Math.floor(params.page ?? 1));
+  const limit = Math.min(200, Math.max(1, Math.floor(params.limit ?? 100)));
+  const offset = (page - 1) * limit;
+
+  return withTenantScope(schoolId, async (tx) => {
+    const predicates = [eq(marksheets.schoolId, schoolId)];
+    if (params.examId) predicates.push(eq(marksheets.examId, params.examId));
+    if (params.classId) predicates.push(eq(marksheets.classId, params.classId));
+    if (params.subjectId) predicates.push(eq(marksheets.subjectId, params.subjectId));
+    if (params.status) predicates.push(eq(marksheets.status, params.status));
+
+    const whereClause = and(...predicates);
+    const [countRows, rows] = await Promise.all([
+      tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(marksheets)
+        .where(whereClause),
+      tx.select().from(marksheets).where(whereClause).limit(limit).offset(offset),
+    ]);
+
+    return {
+      marksheets: rows.map((m) => ({
+        id: m.id,
+        examId: m.examId,
+        classId: m.classId,
+        subjectId: m.subjectId,
+        teacherId: m.teacherId,
+        status: m.status as MarksheetRecord['status'],
+        entries: m.entries,
+        submittedAt: m.submittedAt ?? undefined,
+        submittedBy: m.submittedBy ?? undefined,
+        approvedAt: m.approvedAt ?? undefined,
+        approvedBy: m.approvedBy ?? undefined,
+        dosComment: m.dosComment ?? undefined,
+        version: m.version ?? 1,
+        lastModified: m.lastModified,
+        auditHistory: m.auditHistory,
+      })),
+      total: countRows[0]?.count ?? 0,
+      page,
+      limit,
+    };
+  });
+}
+
+export async function deleteTenantStudent(
+  schoolId: string,
+  studentId: string
+): Promise<{ ok: true }> {
+  return withTenantScope(schoolId, async (tx) => {
+    const existingRows = await tx
+      .select({ id: students.id, fullName: students.fullName })
+      .from(students)
+      .where(and(eq(students.schoolId, schoolId), eq(students.id, studentId)))
+      .limit(1);
+    if (!existingRows[0]) {
+      throw new ValidationAppError('Student record not found.');
+    }
+
+    const schoolSheets = await tx
+      .select({ id: marksheets.id, entries: marksheets.entries })
+      .from(marksheets)
+      .where(eq(marksheets.schoolId, schoolId));
+
+    const hasMarks = schoolSheets.some((sheet) => {
+      const entry = sheet.entries?.[studentId];
+      if (!entry) return false;
+      return Boolean(
+        entry.u1?.trim() ||
+          entry.u2?.trim() ||
+          entry.u3?.trim() ||
+          entry.eot?.trim() ||
+          entry.mark?.trim()
+      );
+    });
+
+    if (hasMarks) {
+      throw new ValidationAppError(
+        'Cannot delete a student with recorded examination marks. Set their status to "Transferred" or "Inactive" to preserve historical transcripts.'
+      );
+    }
+
+    await tx
+      .delete(studentRemarks)
+      .where(and(eq(studentRemarks.schoolId, schoolId), eq(studentRemarks.studentId, studentId)));
+    await tx
+      .delete(students)
+      .where(and(eq(students.schoolId, schoolId), eq(students.id, studentId)));
+
+    return { ok: true };
+  });
+}
+
+export async function upsertTenantClass(
+  schoolId: string,
+  cls: StreamClass,
+  attachToExamId?: string
+): Promise<StreamClass> {
   try {
     const cleanStream = (cls.stream ?? '').trim();
     const cleanName =
@@ -687,6 +912,7 @@ export async function upsertTenantClass(schoolId: string, cls: StreamClass, atta
           classTeacherId: cls.classTeacherId,
           subjectIds: cls.subjectIds,
           subjectTeacherMap: cls.subjectTeacherMap,
+          archived: Boolean(cls.archived),
         })
         .onConflictDoUpdate({
           target: classesStreams.id,
@@ -698,6 +924,7 @@ export async function upsertTenantClass(schoolId: string, cls: StreamClass, atta
             classTeacherId: cls.classTeacherId,
             subjectIds: cls.subjectIds,
             subjectTeacherMap: cls.subjectTeacherMap,
+            archived: Boolean(cls.archived),
           },
         });
 
@@ -715,10 +942,62 @@ export async function upsertTenantClass(schoolId: string, cls: StreamClass, atta
         }
       }
     });
+    return {
+      ...cls,
+      name: cleanName,
+      stream: cleanStream || undefined,
+      archived: Boolean(cls.archived),
+    };
   } catch (error) {
     console.error('Failed to save class:', error);
     throw new Error('Failed to save class stream.', { cause: error });
   }
+}
+
+export async function archiveOrDeleteTenantClass(
+  schoolId: string,
+  classId: string,
+  mode: 'archive' | 'restore' | 'delete'
+): Promise<{ mode: 'archive' | 'restore' | 'delete'; archived: boolean }> {
+  return withTenantScope(schoolId, async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(classesStreams)
+      .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, classId)))
+      .limit(1);
+    if (!existing) throw new ValidationAppError('Class record not found.');
+
+    if (mode === 'archive' || mode === 'restore') {
+      const archived = mode === 'archive';
+      await tx
+        .update(classesStreams)
+        .set({ archived })
+        .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, classId)));
+      return { mode, archived };
+    }
+
+    const [studentCountRows, sheetCountRows] = await Promise.all([
+      tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(students)
+        .where(and(eq(students.schoolId, schoolId), eq(students.classId, classId))),
+      tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(marksheets)
+        .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.classId, classId))),
+    ]);
+
+    if ((studentCountRows[0]?.count ?? 0) > 0 || (sheetCountRows[0]?.count ?? 0) > 0) {
+      throw new ValidationAppError(
+        'This class has enrolled students or recorded marksheets. Archive it instead to preserve academic history.'
+      );
+    }
+
+    await tx
+      .delete(classesStreams)
+      .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, classId)));
+    return { mode: 'delete', archived: false };
+  });
 }
 
 export async function upsertTenantSubject(schoolId: string, sub: SubjectDefinition) {
@@ -736,6 +1015,7 @@ export async function upsertTenantSubject(schoolId: string, sub: SubjectDefiniti
           maxMarks: sub.maxMarks,
           passMark: sub.passMark,
           competencies: sub.competencies,
+          archived: Boolean(sub.archived),
         })
         .onConflictDoUpdate({
           target: subjects.id,
@@ -747,6 +1027,7 @@ export async function upsertTenantSubject(schoolId: string, sub: SubjectDefiniti
             maxMarks: sub.maxMarks,
             passMark: sub.passMark,
             competencies: sub.competencies,
+            archived: Boolean(sub.archived),
           },
         });
     });
@@ -754,6 +1035,45 @@ export async function upsertTenantSubject(schoolId: string, sub: SubjectDefiniti
     console.error('Failed to save subject:', error);
     throw new Error('Failed to save subject definition.', { cause: error });
   }
+}
+
+export async function archiveOrDeleteTenantSubject(
+  schoolId: string,
+  subjectId: string,
+  mode: 'archive' | 'restore' | 'delete'
+): Promise<{ mode: 'archive' | 'restore' | 'delete'; archived: boolean }> {
+  return withTenantScope(schoolId, async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(subjects)
+      .where(and(eq(subjects.schoolId, schoolId), eq(subjects.id, subjectId)))
+      .limit(1);
+    if (!existing) throw new ValidationAppError('Subject not found.');
+
+    if (mode === 'archive' || mode === 'restore') {
+      const archived = mode === 'archive';
+      await tx
+        .update(subjects)
+        .set({ archived })
+        .where(and(eq(subjects.schoolId, schoolId), eq(subjects.id, subjectId)));
+      return { mode, archived };
+    }
+
+    const sheetRows = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(marksheets)
+      .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.subjectId, subjectId)));
+    if ((sheetRows[0]?.count ?? 0) > 0) {
+      throw new ValidationAppError(
+        'This subject has recorded marksheets. Archive it instead to protect historical transcripts.'
+      );
+    }
+
+    await tx
+      .delete(subjects)
+      .where(and(eq(subjects.schoolId, schoolId), eq(subjects.id, subjectId)));
+    return { mode: 'delete', archived: false };
+  });
 }
 
 export async function upsertTenantCombination(schoolId: string, combo: SubjectCombination) {
@@ -821,6 +1141,7 @@ export async function upsertTenantExam(schoolId: string, ex: ExaminationPeriod) 
           submissionDeadline: ex.submissionDeadline,
           locked: ex.locked,
           published: ex.published,
+          archived: Boolean(ex.archived),
           createdAt: ex.createdAt,
         })
         .onConflictDoUpdate({
@@ -836,6 +1157,7 @@ export async function upsertTenantExam(schoolId: string, ex: ExaminationPeriod) 
             submissionDeadline: ex.submissionDeadline,
             locked: ex.locked,
             published: ex.published,
+            archived: Boolean(ex.archived),
           },
         });
     });
@@ -845,9 +1167,159 @@ export async function upsertTenantExam(schoolId: string, ex: ExaminationPeriod) 
   }
 }
 
-export async function upsertTenantMarksheet(schoolId: string, ms: MarksheetRecord) {
+export async function archiveOrDeleteTenantExam(
+  schoolId: string,
+  examId: string,
+  mode: 'archive' | 'restore' | 'delete'
+): Promise<{ mode: 'archive' | 'restore' | 'delete'; archived: boolean }> {
+  return withTenantScope(schoolId, async (tx) => {
+    const [existing] = await tx
+      .select()
+      .from(examinations)
+      .where(and(eq(examinations.schoolId, schoolId), eq(examinations.id, examId)))
+      .limit(1);
+    if (!existing) throw new ValidationAppError('Examination period not found.');
+
+    if (mode === 'archive' || mode === 'restore') {
+      const archived = mode === 'archive';
+      await tx
+        .update(examinations)
+        .set({ archived })
+        .where(and(eq(examinations.schoolId, schoolId), eq(examinations.id, examId)));
+      return { mode, archived };
+    }
+
+    if (existing.published || existing.locked) {
+      throw new ValidationAppError(
+        'Published or locked examinations cannot be deleted. Archive them instead.'
+      );
+    }
+
+    const sheetRows = await tx
+      .select({ count: sql<number>`count(*)::int` })
+      .from(marksheets)
+      .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.examId, examId)));
+    if ((sheetRows[0]?.count ?? 0) > 0) {
+      throw new ValidationAppError(
+        'This examination already has recorded marksheets. Archive it instead.'
+      );
+    }
+
+    await tx
+      .delete(examinations)
+      .where(and(eq(examinations.schoolId, schoolId), eq(examinations.id, examId)));
+    return { mode: 'delete', archived: false };
+  });
+}
+
+async function resolveActorStaffRow(
+  tx: DbTransaction,
+  schoolId: string,
+  actor: TenantActorContext
+) {
+  const cleanEmail = actor.email.trim().toLowerCase();
+  const rows = await tx
+    .select()
+    .from(staffTeachers)
+    .where(
+      and(
+        eq(staffTeachers.schoolId, schoolId),
+        or(
+          actor.staffId
+            ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${actor.staffId.trim().toLowerCase()}`
+            : sql`false`,
+          sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+        )
+      )
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+function matchesTeacherIdentifier(
+  assignedId: string | null | undefined,
+  actor: TenantActorContext,
+  staffRow: typeof staffTeachers.$inferSelect | null,
+  schoolId: string
+): boolean {
+  if (!assignedId) return false;
+  const cleanAssigned = assignedId.trim();
+  if (!cleanAssigned) return false;
+  const candidates = new Set<string>();
+  if (actor.uid) candidates.add(actor.uid);
+  if (actor.uid.startsWith('local:')) candidates.add(actor.uid.slice('local:'.length));
+  if (actor.staffId) candidates.add(actor.staffId);
+  if (staffRow) {
+    candidates.add(staffRow.id);
+    if (staffRow.id.startsWith(`${schoolId}:`)) {
+      candidates.add(staffRow.id.slice(schoolId.length + 1));
+    }
+    if (staffRow.staffId) candidates.add(staffRow.staffId);
+  }
+  return candidates.has(cleanAssigned);
+}
+
+export async function upsertTenantMarksheet(
+  schoolId: string,
+  ms: MarksheetRecord,
+  actorContext?: TenantActorContext
+): Promise<MarksheetRecord> {
   try {
-    await withTenantScope(schoolId, async (tx) => {
+    return await withTenantScope(schoolId, async (tx) => {
+      if (actorContext) {
+        const actorRole = normalizeUserRole(actorContext.role);
+        const isLeadership =
+          actorRole === 'dos' || actorRole === 'headteacher' || actorRole === 'school_admin';
+
+        if (!isLeadership) {
+          if (
+            ms.status === 'approved' ||
+            ms.status === 'published' ||
+            ms.status === 'returned'
+          ) {
+            throw new PermissionError(
+              'Only Director of Studies or Headteacher can approve, return, or publish marksheets.'
+            );
+          }
+
+          const [clsRows, staffRow] = await Promise.all([
+            tx
+              .select()
+              .from(classesStreams)
+              .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, ms.classId)))
+              .limit(1),
+            resolveActorStaffRow(tx, schoolId, actorContext),
+          ]);
+
+          const cls = clsRows[0];
+          const mappedTeacher = cls?.subjectTeacherMap?.[ms.subjectId];
+          const isSubjectTeacher = matchesTeacherIdentifier(
+            mappedTeacher,
+            actorContext,
+            staffRow,
+            schoolId
+          );
+          const isClassTeacher = matchesTeacherIdentifier(
+            cls?.classTeacherId,
+            actorContext,
+            staffRow,
+            schoolId
+          );
+          const hasExplicitLists = Boolean(
+            staffRow &&
+              staffRow.assignedClassIds.includes(ms.classId) &&
+              (staffRow.assignedSubjectIds.length === 0 ||
+                staffRow.assignedSubjectIds.includes(ms.subjectId))
+          );
+
+          if (!isSubjectTeacher && !isClassTeacher && !hasExplicitLists) {
+            throw new PermissionError(
+              'Forbidden: You are not assigned to teach or manage marks for this class and subject.'
+            );
+          }
+        }
+      }
+
       const existing = await tx
         .select()
         .from(marksheets)
@@ -862,7 +1334,15 @@ export async function upsertTenantMarksheet(schoolId: string, ms: MarksheetRecor
         .limit(1);
 
       if (existing[0]) {
-        await tx
+        const currentVersion = existing[0].version ?? 1;
+        if (ms.version !== undefined && ms.version !== currentVersion) {
+          throw new ConflictError(
+            'This marksheet was updated by another user while you were editing. Refresh to load the latest scores before saving.'
+          );
+        }
+
+        const nextVersion = currentVersion + 1;
+        const updatedRows = await tx
           .update(marksheets)
           .set({
             teacherId: ms.teacherId,
@@ -873,13 +1353,37 @@ export async function upsertTenantMarksheet(schoolId: string, ms: MarksheetRecor
             approvedAt: ms.approvedAt ?? null,
             approvedBy: ms.approvedBy ?? null,
             dosComment: ms.dosComment ?? null,
+            version: nextVersion,
             lastModified: ms.lastModified,
             auditHistory: ms.auditHistory,
           })
-          .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.id, existing[0].id)));
-      } else {
-        await tx.insert(marksheets).values({
-          id: ms.id.startsWith(`${schoolId}:`) ? ms.id : `${schoolId}:${ms.id}`,
+          .where(
+            and(
+              eq(marksheets.schoolId, schoolId),
+              eq(marksheets.id, existing[0].id),
+              eq(marksheets.version, currentVersion)
+            )
+          )
+          .returning();
+
+        if (!updatedRows[0]) {
+          throw new ConflictError(
+            'Concurrent update detected while saving marksheet. Refresh to load the latest version.'
+          );
+        }
+
+        return {
+          ...ms,
+          id: existing[0].id,
+          version: updatedRows[0].version,
+        };
+      }
+
+      const insertedId = ms.id.startsWith(`${schoolId}:`) ? ms.id : `${schoolId}:${ms.id}`;
+      const inserted = await tx
+        .insert(marksheets)
+        .values({
+          id: insertedId,
           schoolId,
           examId: ms.examId,
           classId: ms.classId,
@@ -892,12 +1396,22 @@ export async function upsertTenantMarksheet(schoolId: string, ms: MarksheetRecor
           approvedAt: ms.approvedAt ?? null,
           approvedBy: ms.approvedBy ?? null,
           dosComment: ms.dosComment ?? null,
+          version: 1,
           lastModified: ms.lastModified,
           auditHistory: ms.auditHistory,
-        });
-      }
+        })
+        .returning();
+
+      return {
+        ...ms,
+        id: inserted[0]?.id ?? insertedId,
+        version: inserted[0]?.version ?? 1,
+      };
     });
   } catch (error) {
+    if (error instanceof ConflictError || error instanceof PermissionError) {
+      throw error;
+    }
     console.error('Failed to save marksheet:', error);
     throw new Error('Failed to save marksheet.', { cause: error });
   }
@@ -939,6 +1453,7 @@ export async function publishAllApprovedTenantMarksheets(
           .update(marksheets)
           .set({
             status: 'published',
+            version: (m.version ?? 1) + 1,
             lastModified: now,
             auditHistory: nextHistory,
           })
@@ -961,11 +1476,50 @@ export async function upsertTenantStudentRemark(
   examId: string,
   studentId: string,
   field: keyof StudentTermRemarks,
-  value: string
+  value: string,
+  actorContext?: TenantActorContext
 ) {
   const rowId = `${schoolId}:${examId}:${studentId}`;
   try {
     await withTenantScope(schoolId, async (tx) => {
+      if (actorContext) {
+        const actorRole = normalizeUserRole(actorContext.role);
+        const isLeadership =
+          actorRole === 'dos' || actorRole === 'headteacher' || actorRole === 'school_admin';
+        if (!isLeadership) {
+          if (actorRole !== 'class_teacher' || field !== 'classTeacherRemark') {
+            throw new PermissionError(
+              'Only assigned Class Teachers can edit class teacher remarks.'
+            );
+          }
+          const [stuRows, staffRow] = await Promise.all([
+            tx
+              .select({ classId: students.classId })
+              .from(students)
+              .where(and(eq(students.schoolId, schoolId), eq(students.id, studentId)))
+              .limit(1),
+            resolveActorStaffRow(tx, schoolId, actorContext),
+          ]);
+          const stuClassId = stuRows[0]?.classId;
+          if (!stuClassId) {
+            throw new ValidationAppError('Student record not found.');
+          }
+          const clsRows = await tx
+            .select({ classTeacherId: classesStreams.classTeacherId })
+            .from(classesStreams)
+            .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, stuClassId)))
+            .limit(1);
+          const isAssignedClassTeacher =
+            matchesTeacherIdentifier(clsRows[0]?.classTeacherId, actorContext, staffRow, schoolId) ||
+            Boolean(staffRow?.assignedClassIds.includes(stuClassId));
+          if (!isAssignedClassTeacher) {
+            throw new PermissionError(
+              'Forbidden: You can only record class teacher remarks for students in your assigned class.'
+            );
+          }
+        }
+      }
+
       const existing = await tx
         .select()
         .from(studentRemarks)
@@ -990,6 +1544,9 @@ export async function upsertTenantStudentRemark(
       }
     });
   } catch (error) {
+    if (error instanceof PermissionError || error instanceof ValidationAppError) {
+      throw error;
+    }
     console.error('Failed to update student remark:', error);
     throw new Error('Failed to save student remark.', { cause: error });
   }
@@ -1124,6 +1681,13 @@ export async function upsertTenantStaffMember(
         .limit(1);
 
       const scopedId = existingStaffRows[0]?.id ?? (rawId.includes(':') ? rawId : prefixedId);
+      const isNewStaff = !existingStaffRows[0];
+      const nextMustChange =
+        staff.mustChangePassword !== undefined
+          ? Boolean(staff.mustChangePassword)
+          : isNewStaff || hasNewPassword
+            ? true
+            : Boolean(existingStaffRows[0]?.mustChangePassword);
 
       let assignedStaffId = existingStaffRows[0]?.staffId?.trim() || staff.staffId?.trim() || null;
       if (!assignedStaffId) {
@@ -1155,6 +1719,7 @@ export async function upsertTenantStaffMember(
           passwordHash: computedHash ?? hashPassword('SchuleFlow2026!'),
           role: normalizedRole,
           active: staff.active,
+          mustChangePassword: nextMustChange,
           phone: normalizedPhone,
           assignedClassIds: staff.assignedClassIds,
           assignedSubjectIds: staff.assignedSubjectIds,
@@ -1172,7 +1737,7 @@ export async function upsertTenantStaffMember(
             phone: normalizedPhone,
             assignedClassIds: staff.assignedClassIds,
             assignedSubjectIds: staff.assignedSubjectIds,
-            ...(computedHash ? { passwordHash: computedHash } : {}),
+            ...(computedHash ? { passwordHash: computedHash, mustChangePassword: nextMustChange } : {}),
           },
         });
 
@@ -1199,7 +1764,7 @@ export async function upsertTenantStaffMember(
             schoolId,
             schoolRole: normalizedRole,
             active: staff.active,
-            ...(computedHash ? { passwordHash: computedHash } : {}),
+            ...(computedHash ? { passwordHash: computedHash, mustChangePassword: nextMustChange } : {}),
           })
           .where(eq(users.id, existingAuthUsers[0].id));
       } else {
@@ -1217,6 +1782,7 @@ export async function upsertTenantStaffMember(
             schoolId,
             schoolRole: normalizedRole,
             active: staff.active,
+            mustChangePassword: nextMustChange,
           })
           .onConflictDoUpdate({
             target: users.uid,
@@ -1229,7 +1795,7 @@ export async function upsertTenantStaffMember(
               schoolId,
               schoolRole: normalizedRole,
               active: staff.active,
-              ...(computedHash ? { passwordHash: computedHash } : {}),
+              ...(computedHash ? { passwordHash: computedHash, mustChangePassword: nextMustChange } : {}),
             },
           });
       }
@@ -1241,6 +1807,7 @@ export async function upsertTenantStaffMember(
         email: cleanEmail,
         username: cleanUsername,
         role: normalizedRole,
+        mustChangePassword: nextMustChange,
         phone: normalizedPhone ?? undefined,
         password: '********',
       };
@@ -1290,6 +1857,7 @@ export async function bulkUpsertTenantStaff(
           staff.password && staff.password !== '********'
             ? hashPassword(staff.password)
             : hashPassword('SchuleFlow2026!');
+        const forcePwdChange = existingMatch ? false : true;
 
         let assignedStaffId = existingMatch?.staffId?.trim() || staff.staffId?.trim() || null;
         if (!assignedStaffId || (!existingMatch && usedSet.has(assignedStaffId.toUpperCase()))) {
@@ -1310,6 +1878,7 @@ export async function bulkUpsertTenantStaff(
             passwordHash: pwdHash,
             role: normalizedRole,
             active: staff.active,
+            mustChangePassword: forcePwdChange,
             phone: normalizedPhone,
             assignedClassIds: staff.assignedClassIds,
             assignedSubjectIds: staff.assignedSubjectIds,
@@ -1344,6 +1913,7 @@ export async function bulkUpsertTenantStaff(
             schoolId,
             schoolRole: normalizedRole,
             active: staff.active,
+            mustChangePassword: forcePwdChange,
           })
           .onConflictDoUpdate({
             target: users.uid,
@@ -1365,6 +1935,7 @@ export async function bulkUpsertTenantStaff(
           email: cleanEmail,
           username: cleanUsername,
           role: normalizedRole,
+          mustChangePassword: forcePwdChange,
           phone: normalizedPhone ?? undefined,
           password: '********',
         });
@@ -1376,6 +1947,205 @@ export async function bulkUpsertTenantStaff(
     console.error('Failed to bulk upload staff members:', error);
     throw new Error('Failed to import staff directory.', { cause: error });
   }
+}
+
+export async function resetTenantStaffPasswordByAdmin(
+  schoolId: string,
+  staffRowId: string,
+  suppliedTempPassword?: string
+): Promise<{
+  id: string;
+  staffId: string | null;
+  email: string;
+  name: string;
+  temporaryPassword: string;
+}> {
+  const tempPassword = suppliedTempPassword?.trim()
+    ? suppliedTempPassword.trim()
+    : `SF-${randomBytes(3).toString('hex').toUpperCase()}9`;
+
+  const strengthErr = validatePasswordStrength(tempPassword);
+  if (strengthErr) {
+    throw new ValidationAppError(strengthErr);
+  }
+
+  const nextHash = hashPassword(tempPassword);
+  const rawId = staffRowId.trim();
+  const unprefixed = rawId.startsWith(`${schoolId}:`) ? rawId.slice(schoolId.length + 1) : rawId;
+  const prefixed = `${schoolId}:${unprefixed}`;
+
+  return withTenantScope(schoolId, async (tx) => {
+    const existingRows = await tx
+      .select()
+      .from(staffTeachers)
+      .where(
+        and(
+          eq(staffTeachers.schoolId, schoolId),
+          inArray(staffTeachers.id, [rawId, prefixed, unprefixed])
+        )
+      )
+      .limit(1);
+
+    const target = existingRows[0];
+    if (!target) {
+      throw new ValidationAppError('Staff account not found.');
+    }
+
+    await tx
+      .update(staffTeachers)
+      .set({ passwordHash: nextHash, mustChangePassword: true })
+      .where(eq(staffTeachers.id, target.id));
+
+    await tx
+      .update(users)
+      .set({ passwordHash: nextHash, mustChangePassword: true })
+      .where(
+        and(
+          eq(users.schoolId, schoolId),
+          or(
+            target.staffId
+              ? sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${target.staffId.toLowerCase()}`
+              : sql`false`,
+            sql`lower(trim(${users.email})) = ${target.email.trim().toLowerCase()}`
+          )
+        )
+      );
+
+    return {
+      id: target.id,
+      staffId: target.staffId ?? null,
+      email: target.email,
+      name: target.name,
+      temporaryPassword: tempPassword,
+    };
+  });
+}
+
+export async function getSchoolMediaStorageSummary(schoolId: string): Promise<{
+  configured: boolean;
+  bucket: string;
+  urlOrigin?: string;
+  inlineLogoCount: number;
+  inlineStudentPhotosCount: number;
+  supabaseStudentPhotosCount: number;
+}> {
+  const status = isSupabaseStorageConfigured();
+  return withTenantScope(schoolId, async (tx) => {
+    const [schRows, gcRows, stuRows] = await Promise.all([
+      tx.select({ logoUrl: schools.logoUrl }).from(schools).where(eq(schools.id, schoolId)).limit(1),
+      tx
+        .select({ reportLayout: gradingConfigs.reportLayout })
+        .from(gradingConfigs)
+        .where(eq(gradingConfigs.schoolId, schoolId))
+        .limit(1),
+      tx
+        .select({ photoDataUrl: students.photoDataUrl })
+        .from(students)
+        .where(eq(students.schoolId, schoolId)),
+    ]);
+
+    const logoVal = schRows[0]?.logoUrl || gcRows[0]?.reportLayout?.customLogoDataUrl || '';
+    const inlineLogoCount = isInlineDataImageUrl(logoVal) ? 1 : 0;
+
+    let inlineStudentPhotosCount = 0;
+    let supabaseStudentPhotosCount = 0;
+    for (const row of stuRows) {
+      if (!row.photoDataUrl) continue;
+      if (isInlineDataImageUrl(row.photoDataUrl)) {
+        inlineStudentPhotosCount += 1;
+      } else if (/^https?:\/\//i.test(row.photoDataUrl)) {
+        supabaseStudentPhotosCount += 1;
+      }
+    }
+
+    return {
+      ...status,
+      inlineLogoCount,
+      inlineStudentPhotosCount,
+      supabaseStudentPhotosCount,
+    };
+  });
+}
+
+export async function migrateSchoolMediaToSupabase(schoolId: string): Promise<{
+  migratedLogos: number;
+  migratedPhotos: number;
+  skipped: number;
+}> {
+  const status = isSupabaseStorageConfigured();
+  if (!status.configured) {
+    throw new ValidationAppError(
+      'Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in your environment first.'
+    );
+  }
+
+  let migratedLogos = 0;
+  let migratedPhotos = 0;
+  let skipped = 0;
+
+  await withTenantScope(schoolId, async (tx) => {
+    const [schRows, gcRows, stuRows] = await Promise.all([
+      tx.select({ logoUrl: schools.logoUrl }).from(schools).where(eq(schools.id, schoolId)).limit(1),
+      tx
+        .select({ id: gradingConfigs.id, reportLayout: gradingConfigs.reportLayout })
+        .from(gradingConfigs)
+        .where(eq(gradingConfigs.schoolId, schoolId))
+        .limit(1),
+      tx
+        .select({ id: students.id, photoDataUrl: students.photoDataUrl })
+        .from(students)
+        .where(eq(students.schoolId, schoolId)),
+    ]);
+
+    const currentLogo = schRows[0]?.logoUrl || gcRows[0]?.reportLayout?.customLogoDataUrl || '';
+    if (isInlineDataImageUrl(currentLogo)) {
+      const uploaded = await uploadMediaToSupabase({
+        schoolId,
+        folder: 'logos',
+        entityId: 'school-crest',
+        dataUrl: currentLogo,
+      });
+      await tx.update(schools).set({ logoUrl: uploaded.url }).where(eq(schools.id, schoolId));
+      if (gcRows[0]) {
+        await tx
+          .update(gradingConfigs)
+          .set({
+            reportLayout: {
+              ...gcRows[0].reportLayout,
+              customLogoDataUrl: uploaded.url,
+            },
+          })
+          .where(eq(gradingConfigs.id, gcRows[0].id));
+      }
+      migratedLogos += 1;
+    }
+
+    for (const stu of stuRows) {
+      if (!stu.photoDataUrl) continue;
+      if (!isInlineDataImageUrl(stu.photoDataUrl)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const uploaded = await uploadMediaToSupabase({
+          schoolId,
+          folder: 'students',
+          entityId: stu.id,
+          dataUrl: stu.photoDataUrl,
+        });
+        await tx
+          .update(students)
+          .set({ photoDataUrl: uploaded.url })
+          .where(and(eq(students.schoolId, schoolId), eq(students.id, stu.id)));
+        migratedPhotos += 1;
+      } catch (err) {
+        console.warn(`Skipped migrating photo for student ${stu.id}:`, err);
+        skipped += 1;
+      }
+    }
+  });
+
+  return { migratedLogos, migratedPhotos, skipped };
 }
 
 export async function incrementTenantReportsGenerated(schoolId: string, count: number) {

@@ -1,8 +1,9 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import {
   Award,
   BookOpen,
   GraduationCap,
+  Loader2,
   RotateCcw,
   Shield,
   Trash2,
@@ -15,10 +16,12 @@ import type {
   ReportCardLayoutConfig,
   ReportCardStyle,
 } from '../types';
+import { processSchoolBadge } from '../utils/photo';
 
 interface ReportCardCustomizerProps {
   layout: ReportCardLayoutConfig;
   onChange: (updated: ReportCardLayoutConfig) => void;
+  onUploadLogo?: (dataUrl: string) => Promise<string>;
   compact?: boolean;
 }
 
@@ -51,9 +54,11 @@ const CREST_OPTIONS: Array<{
 export function ReportCardCustomizer({
   layout,
   onChange,
+  onUploadLogo,
   compact = false,
 }: ReportCardCustomizerProps) {
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
 
   const update = <K extends keyof ReportCardLayoutConfig>(
     key: K,
@@ -62,19 +67,22 @@ export function ReportCardCustomizer({
     onChange({ ...layout, [key]: value });
   };
 
-  const handleLogoUpload = (file: File) => {
-    if (file.size > 1024 * 1024 * 2) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        onChange({
-          ...layout,
-          crestType: 'custom',
-          customLogoDataUrl: reader.result,
-        });
-      }
-    };
-    reader.readAsDataURL(file);
+  const handleLogoUpload = async (file: File) => {
+    if (file.size > 1024 * 1024 * 4) return;
+    setUploadingLogo(true);
+    try {
+      const processed = await processSchoolBadge(file);
+      const storedUrl = onUploadLogo ? await onUploadLogo(processed) : processed;
+      onChange({
+        ...layout,
+        crestType: 'custom',
+        customLogoDataUrl: storedUrl,
+      });
+    } catch {
+      // Ignore malformed image
+    } finally {
+      setUploadingLogo(false);
+    }
   };
 
   return (
@@ -216,20 +224,28 @@ export function ReportCardCustomizer({
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) handleLogoUpload(f);
+              if (f) void handleLogoUpload(f);
+              e.currentTarget.value = '';
             }}
           />
           <button
             type="button"
+            disabled={uploadingLogo}
             onClick={() => logoInputRef.current?.click()}
-            className={`inline-flex items-center gap-1 rounded border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+            className={`inline-flex items-center gap-1 rounded border px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
               layout.crestType === 'custom'
                 ? 'border-blue-700 bg-blue-50 text-blue-900'
                 : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-            }`}
+            } disabled:opacity-60`}
           >
-            <Upload className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{layout.customLogoDataUrl ? 'Change Logo' : 'Upload Logo'}</span>
+            {uploadingLogo ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            ) : (
+              <Upload className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+            <span>
+              {uploadingLogo ? 'Uploading...' : layout.customLogoDataUrl ? 'Change Logo' : 'Upload Logo'}
+            </span>
           </button>
         </div>
       </div>

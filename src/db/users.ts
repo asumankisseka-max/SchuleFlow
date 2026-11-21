@@ -2,6 +2,7 @@ import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import {
   hashPassword,
   signRecoveryToken,
+  validatePasswordStrength,
   verifyPassword,
   verifyRecoveryToken,
   type RecoveryLookupMethod,
@@ -31,6 +32,7 @@ function toProfile(
     schoolId: globalRole === 'super_admin' ? null : row.schoolId,
     schoolRole: normalizeUserRole(row.schoolRole),
     active: row.active,
+    mustChangePassword: Boolean(row.mustChangePassword),
   };
 }
 
@@ -95,30 +97,254 @@ export async function lookupSchoolByCode(
 
 export class AuthValidationError extends Error {
   status: number;
-  constructor(message: string, status = 401) {
+  code?: string;
+  constructor(message: string, status = 401, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
+}
+
+// Constant-time timing-attack guard used when an identifier matches zero database rows
+const DUMMY_TIMING_HASH = hashPassword('schuleflow-dummy-timing-guard-9912');
+
+async function findMatchingStaffForUserRow(
+  schoolId: string,
+  row: typeof users.$inferSelect
+): Promise<typeof staffTeachers.$inferSelect | undefined> {
+  const cleanEmail = row.email.trim().toLowerCase();
+  const staffMatchRows = await db
+    .select()
+    .from(staffTeachers)
+    .where(
+      and(
+        eq(staffTeachers.schoolId, schoolId),
+        or(
+          row.staffId
+            ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${row.staffId.toLowerCase()}`
+            : sql`false`,
+          sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+        )
+      )
+    )
+    .limit(1);
+  return staffMatchRows[0];
+}
+
+async function finalizeSchoolUserLogin(
+  school: typeof schools.$inferSelect,
+  userRow?: typeof users.$inferSelect,
+  matchedStaff?: typeof staffTeachers.$inferSelect
+): Promise<AuthSessionProfile> {
+  if (userRow) {
+    if (!userRow.active || (matchedStaff && !matchedStaff.active)) {
+      throw new AuthValidationError(
+        'Account deactivated. Please contact your School Administrator.',
+        403
+      );
+    }
+
+    const effectiveRole = matchedStaff
+      ? normalizeUserRole(matchedStaff.role)
+      : normalizeUserRole(userRow.schoolRole);
+    const effectiveStaffId = matchedStaff?.staffId ?? userRow.staffId ?? null;
+
+    if (matchedStaff) {
+      await db
+        .update(staffTeachers)
+        .set({ lastLogin: new Date().toISOString() })
+        .where(eq(staffTeachers.id, matchedStaff.id));
+    }
+
+    const effectiveMustChange = Boolean(
+      userRow.mustChangePassword || matchedStaff?.mustChangePassword
+    );
+    const updated = await db
+      .update(users)
+      .set({
+        globalRole: 'school_user',
+        staffId: effectiveStaffId,
+        schoolId: school.id,
+        schoolRole: effectiveRole,
+        mustChangePassword: effectiveMustChange,
+        lastLogin: new Date(),
+      })
+      .where(eq(users.id, userRow.id))
+      .returning();
+
+    return toProfile(updated[0], school.schoolCode);
+  }
+
+  const staff = matchedStaff!;
+  if (!staff.active) {
+    throw new AuthValidationError(
+      'Account deactivated. Please contact your School Administrator.',
+      403
+    );
+  }
+
+  const staffEmail = staff.email.trim().toLowerCase();
+  const normalizedPhone = normalizeStoredPhone(staff.phone);
+  const effectiveRole = normalizeUserRole(staff.role);
+  const localUid = staff.id.includes(':')
+    ? `local:${staff.id}`
+    : `local:${school.id}:${staff.id}`;
+
+  await db
+    .update(staffTeachers)
+    .set({ lastLogin: new Date().toISOString() })
+    .where(eq(staffTeachers.id, staff.id));
+
+  const inserted = await db
+    .insert(users)
+    .values({
+      uid: localUid,
+      staffId: staff.staffId,
+      email: staffEmail,
+      username: staff.username.toLowerCase(),
+      phone: normalizedPhone,
+      passwordHash: staff.passwordHash,
+      name: staff.name,
+      globalRole: 'school_user',
+      schoolId: school.id,
+      schoolRole: effectiveRole,
+      active: staff.active,
+      mustChangePassword: Boolean(staff.mustChangePassword),
+      lastLogin: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: users.uid,
+      set: {
+        staffId: staff.staffId,
+        phone: normalizedPhone,
+        globalRole: 'school_user',
+        schoolId: school.id,
+        schoolRole: effectiveRole,
+        active: staff.active,
+        mustChangePassword: Boolean(staff.mustChangePassword),
+        lastLogin: new Date(),
+      },
+    })
+    .returning();
+
+  return toProfile(inserted[0], school.schoolCode);
 }
 
 export async function authenticateWithCredentials(params: {
   schoolCode?: string;
   identifier: string;
   password: string;
-  mode?: 'school' | 'super_admin';
 }): Promise<AuthSessionProfile | null> {
   const cleanIdentifier = params.identifier.trim().toLowerCase();
   const cleanSchoolCode = params.schoolCode?.trim().toUpperCase() || '';
   const password = params.password;
-  const mode = params.mode ?? (cleanSchoolCode ? 'school' : 'super_admin');
 
   if (!cleanIdentifier || !password) {
     return null;
   }
 
-  // 1. Platform Super Admin Login (database-backed PostgreSQL users table, no schoolCode required)
-  if (mode === 'super_admin') {
-    const superAdminRows = await db
+  const phoneCandidates = buildPhoneLoginCandidates(params.identifier);
+  const userPhonePredicate =
+    phoneCandidates.length > 0
+      ? inArray(
+          sql`regexp_replace(COALESCE(${users.phone}, ''), '[\\s()-]+', '', 'g')`,
+          phoneCandidates
+        )
+      : undefined;
+  const staffPhonePredicate =
+    phoneCandidates.length > 0
+      ? inArray(
+          sql`regexp_replace(COALESCE(${staffTeachers.phone}, ''), '[\\s()-]+', '', 'g')`,
+          phoneCandidates
+        )
+      : undefined;
+
+  // 1. Optional explicit School Code scoping (used when caller supplies schoolCode or disambiguates)
+  if (cleanSchoolCode) {
+    const schoolRows = await db
+      .select()
+      .from(schools)
+      .where(sql`upper(trim(${schools.schoolCode})) = ${cleanSchoolCode}`)
+      .limit(1);
+
+    const school = schoolRows[0];
+    if (!school) {
+      verifyPassword(password, DUMMY_TIMING_HASH);
+      return null;
+    }
+
+    const userRows = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.schoolId, school.id),
+          sql`${users.globalRole} <> 'super_admin'`,
+          or(
+            sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${cleanIdentifier}`,
+            sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
+            sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`,
+            ...(userPhonePredicate ? [userPhonePredicate] : [])
+          )
+        )
+      )
+      .limit(10);
+
+    const staffList = await db
+      .select()
+      .from(staffTeachers)
+      .where(
+        and(
+          eq(staffTeachers.schoolId, school.id),
+          or(
+            sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${cleanIdentifier}`,
+            sql`lower(trim(${staffTeachers.email})) = ${cleanIdentifier}`,
+            sql`lower(trim(${staffTeachers.username})) = ${cleanIdentifier}`,
+            ...(staffPhonePredicate ? [staffPhonePredicate] : [])
+          )
+        )
+      )
+      .limit(10);
+
+    if (userRows.length === 0 && staffList.length === 0) {
+      verifyPassword(password, DUMMY_TIMING_HASH);
+      return null;
+    }
+
+    let matchedInactive = false;
+    for (const row of userRows) {
+      if (verifyPassword(password, row.passwordHash)) {
+        const matchedStaff = await findMatchingStaffForUserRow(school.id, row);
+        if (!row.active || (matchedStaff && !matchedStaff.active)) {
+          matchedInactive = true;
+          continue;
+        }
+        return finalizeSchoolUserLogin(school, row, matchedStaff);
+      }
+    }
+
+    for (const staff of staffList) {
+      if (verifyPassword(password, staff.passwordHash)) {
+        if (!staff.active) {
+          matchedInactive = true;
+          continue;
+        }
+        return finalizeSchoolUserLogin(school, undefined, staff);
+      }
+    }
+
+    if (matchedInactive) {
+      throw new AuthValidationError(
+        'Account deactivated. Please contact your School Administrator.',
+        403
+      );
+    }
+    return null;
+  }
+
+  // 2. Credential-driven automatic separation (Platform Super Admin vs School Tenants)
+  const [superAdminRows, schoolUserRows, staffRows] = await Promise.all([
+    db
       .select()
       .from(users)
       .where(
@@ -130,151 +356,27 @@ export async function authenticateWithCredentials(params: {
           )
         )
       )
-      .limit(5);
-
-    for (const row of superAdminRows) {
-      if (verifyPassword(password, row.passwordHash)) {
-        if (!row.active) {
-          throw new AuthValidationError(
-            'Account deactivated. Please contact Platform Support.',
-            403
-          );
-        }
-        const updated = await db
-          .update(users)
-          .set({
-            globalRole: 'super_admin',
-            schoolId: null,
-            lastLogin: new Date(),
-          })
-          .where(eq(users.id, row.id))
-          .returning();
-        return toProfile(updated[0], null);
-      }
-    }
-    return null;
-  }
-
-  // 2. School Workspace Login: School Code is mandatory and isolates the user query strictly to school_id
-  if (!cleanSchoolCode) {
-    throw new AuthValidationError('School Code is required for school staff sign-in.', 400);
-  }
-
-  const schoolRows = await db
-    .select()
-    .from(schools)
-    .where(sql`upper(trim(${schools.schoolCode})) = ${cleanSchoolCode}`)
-    .limit(1);
-
-  const school = schoolRows[0];
-  if (!school) {
-    throw new AuthValidationError(
-      'Invalid School Code. Verify the code with your School Administrator.',
-      401
-    );
-  }
-
-  const phoneCandidates = buildPhoneLoginCandidates(params.identifier);
-  const userPhonePredicate =
-    phoneCandidates.length > 0
-      ? inArray(
-          sql`regexp_replace(COALESCE(${users.phone}, ''), '[\\s()-]+', '', 'g')`,
-          phoneCandidates
-        )
-      : undefined;
-
-  const userRows = await db
-    .select()
-    .from(users)
-    .where(
-      and(
-        eq(users.schoolId, school.id),
-        or(
-          sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${cleanIdentifier}`,
-          sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
-          sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`,
-          ...(userPhonePredicate ? [userPhonePredicate] : [])
-        )
-      )
-    )
-    .limit(10);
-
-  for (const row of userRows) {
-    if (verifyPassword(password, row.passwordHash)) {
-      if (!row.active) {
-        throw new AuthValidationError(
-          'Account deactivated. Please contact your School Administrator.',
-          403
-        );
-      }
-
-      const cleanEmail = row.email.trim().toLowerCase();
-      const staffMatchRows = await db
-        .select()
-        .from(staffTeachers)
-        .where(
-          and(
-            eq(staffTeachers.schoolId, school.id),
-            or(
-              row.staffId
-                ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${row.staffId.toLowerCase()}`
-                : sql`false`,
-              sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
-            )
+      .limit(5),
+    db
+      .select()
+      .from(users)
+      .where(
+        and(
+          sql`${users.globalRole} <> 'super_admin'`,
+          sql`${users.schoolId} IS NOT NULL`,
+          or(
+            sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${cleanIdentifier}`,
+            sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
+            sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`,
+            ...(userPhonePredicate ? [userPhonePredicate] : [])
           )
         )
-        .limit(1);
-
-      const matchedStaff = staffMatchRows[0];
-      if (matchedStaff && !matchedStaff.active) {
-        throw new AuthValidationError(
-          'Account deactivated. Please contact your School Administrator.',
-          403
-        );
-      }
-
-      const effectiveRole = matchedStaff
-        ? normalizeUserRole(matchedStaff.role)
-        : normalizeUserRole(row.schoolRole);
-      const effectiveStaffId = matchedStaff?.staffId ?? row.staffId ?? null;
-
-      if (matchedStaff) {
-        await db
-          .update(staffTeachers)
-          .set({ lastLogin: new Date().toISOString() })
-          .where(eq(staffTeachers.id, matchedStaff.id));
-      }
-
-      const updated = await db
-        .update(users)
-        .set({
-          staffId: effectiveStaffId,
-          schoolId: school.id,
-          schoolRole: effectiveRole,
-          lastLogin: new Date(),
-        })
-        .where(eq(users.id, row.id))
-        .returning();
-
-      return toProfile(updated[0], school.schoolCode);
-    }
-  }
-
-  // Fallback check strictly scoped to staff_teachers WHERE school_id = $school.id
-  const staffPhonePredicate =
-    phoneCandidates.length > 0
-      ? inArray(
-          sql`regexp_replace(COALESCE(${staffTeachers.phone}, ''), '[\\s()-]+', '', 'g')`,
-          phoneCandidates
-        )
-      : undefined;
-
-  const staffList = await db
-    .select()
-    .from(staffTeachers)
-    .where(
-      and(
-        eq(staffTeachers.schoolId, school.id),
+      )
+      .limit(20),
+    db
+      .select()
+      .from(staffTeachers)
+      .where(
         or(
           sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${cleanIdentifier}`,
           sql`lower(trim(${staffTeachers.email})) = ${cleanIdentifier}`,
@@ -282,64 +384,117 @@ export async function authenticateWithCredentials(params: {
           ...(staffPhonePredicate ? [staffPhonePredicate] : [])
         )
       )
-    )
-    .limit(10);
+      .limit(20),
+  ]);
 
-  for (const staff of staffList) {
-    if (verifyPassword(password, staff.passwordHash)) {
-      if (!staff.active) {
-        throw new AuthValidationError(
-          'Account deactivated. Please contact your School Administrator.',
-          403
-        );
+  if (superAdminRows.length === 0 && schoolUserRows.length === 0 && staffRows.length === 0) {
+    verifyPassword(password, DUMMY_TIMING_HASH);
+    return null;
+  }
+
+  const verifiedSuperAdmins: Array<typeof users.$inferSelect> = [];
+  const verifiedSchoolTargets = new Map<
+    string,
+    {
+      schoolId: string;
+      userRow?: typeof users.$inferSelect;
+      staffRow?: typeof staffTeachers.$inferSelect;
+    }
+  >();
+  let deactivatedType: 'super_admin' | 'school' | null = null;
+
+  for (const row of superAdminRows) {
+    if (verifyPassword(password, row.passwordHash)) {
+      if (!row.active) {
+        deactivatedType = deactivatedType ?? 'super_admin';
+      } else {
+        verifiedSuperAdmins.push(row);
       }
-
-      const staffEmail = staff.email.trim().toLowerCase();
-      const normalizedPhone = normalizeStoredPhone(staff.phone);
-      const effectiveRole = normalizeUserRole(staff.role);
-      const localUid = staff.id.includes(':')
-        ? `local:${staff.id}`
-        : `local:${school.id}:${staff.id}`;
-
-      await db
-        .update(staffTeachers)
-        .set({ lastLogin: new Date().toISOString() })
-        .where(eq(staffTeachers.id, staff.id));
-
-      const inserted = await db
-        .insert(users)
-        .values({
-          uid: localUid,
-          staffId: staff.staffId,
-          email: staffEmail,
-          username: staff.username.toLowerCase(),
-          phone: normalizedPhone,
-          passwordHash: staff.passwordHash,
-          name: staff.name,
-          globalRole: 'school_user',
-          schoolId: school.id,
-          schoolRole: effectiveRole,
-          active: staff.active,
-          lastLogin: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: users.uid,
-          set: {
-            staffId: staff.staffId,
-            phone: normalizedPhone,
-            schoolId: school.id,
-            schoolRole: effectiveRole,
-            active: staff.active,
-            lastLogin: new Date(),
-          },
-        })
-        .returning();
-
-      return toProfile(inserted[0], school.schoolCode);
     }
   }
 
-  return null;
+  for (const row of schoolUserRows) {
+    if (!row.schoolId) continue;
+    if (verifyPassword(password, row.passwordHash)) {
+      const matchedStaff = await findMatchingStaffForUserRow(row.schoolId, row);
+      if (!row.active || (matchedStaff && !matchedStaff.active)) {
+        deactivatedType = 'school';
+      } else if (!verifiedSchoolTargets.has(row.schoolId)) {
+        verifiedSchoolTargets.set(row.schoolId, {
+          schoolId: row.schoolId,
+          userRow: row,
+          staffRow: matchedStaff,
+        });
+      }
+    }
+  }
+
+  for (const staff of staffRows) {
+    if (!staff.schoolId) continue;
+    if (verifiedSchoolTargets.has(staff.schoolId)) continue;
+    if (verifyPassword(password, staff.passwordHash)) {
+      if (!staff.active) {
+        deactivatedType = 'school';
+      } else {
+        verifiedSchoolTargets.set(staff.schoolId, {
+          schoolId: staff.schoolId,
+          staffRow: staff,
+        });
+      }
+    }
+  }
+
+  const totalTargets = (verifiedSuperAdmins.length > 0 ? 1 : 0) + verifiedSchoolTargets.size;
+  if (totalTargets === 0) {
+    if (deactivatedType === 'super_admin') {
+      throw new AuthValidationError(
+        'Account deactivated. Please contact Platform Support.',
+        403
+      );
+    }
+    if (deactivatedType === 'school') {
+      throw new AuthValidationError(
+        'Account deactivated. Please contact your School Administrator.',
+        403
+      );
+    }
+    return null;
+  }
+
+  if (totalTargets > 1) {
+    throw new AuthValidationError(
+      'Your credentials match multiple workspaces. Enter your School Code to continue.',
+      409,
+      'SCHOOL_CODE_REQUIRED'
+    );
+  }
+
+  if (verifiedSuperAdmins.length > 0) {
+    const adminRow = verifiedSuperAdmins[0];
+    const updated = await db
+      .update(users)
+      .set({
+        globalRole: 'super_admin',
+        schoolId: null,
+        lastLogin: new Date(),
+      })
+      .where(eq(users.id, adminRow.id))
+      .returning();
+    return toProfile(updated[0], null);
+  }
+
+  const [target] = Array.from(verifiedSchoolTargets.values());
+  const schoolRows = await db
+    .select()
+    .from(schools)
+    .where(eq(schools.id, target.schoolId))
+    .limit(1);
+  const school = schoolRows[0];
+  if (!school) {
+    return null;
+  }
+
+  return finalizeSchoolUserLogin(school, target.userRow, target.staffRow);
 }
 
 export async function updateUserTenantRole(
@@ -638,22 +793,15 @@ export async function verifyRecoveryIdentity(
 
   const answerLower = answer.toLowerCase();
   const answerPhoneCandidates = buildPhoneLoginCandidates(answer);
-  const answerDigits = answer.replace(/\D/g, '');
-  const phoneDigits = (phone ?? '').replace(/\D/g, '');
 
-  const matchesName =
-    payload.lookupMethod === 'identifier' &&
-    normalizePersonName(name) === normalizePersonName(answer);
+  // Hardened identity verification: disallow public-name-only or 4-digit suffix bypasses.
+  // Require matching full registered phone number, Staff ID, or full email address.
   const matchesEmail = email === answerLower;
-  const matchesUsername = username === answerLower;
   const matchesStaffId = Boolean(staffCode && staffCode.toLowerCase() === answerLower);
-  const matchesPhone = Boolean(
-    phone &&
-      (answerPhoneCandidates.includes(phone) ||
-        (answerDigits.length === 4 && phoneDigits.endsWith(answerDigits)))
-  );
+  const matchesPhone = Boolean(phone && answerPhoneCandidates.includes(phone));
+  const matchesUsername = payload.lookupMethod === 'name_school' && username === answerLower;
 
-  if (!matchesName && !matchesEmail && !matchesUsername && !matchesStaffId && !matchesPhone) {
+  if (!matchesEmail && !matchesStaffId && !matchesPhone && !matchesUsername) {
     return null;
   }
 
@@ -711,8 +859,9 @@ export async function resetPasswordWithRecoveryToken(
   if (!payload) return null;
 
   const trimmedPwd = newPassword.trim();
-  if (trimmedPwd.length < 6) {
-    throw new Error('New password must be at least 6 characters long.');
+  const strengthErr = validatePasswordStrength(trimmedPwd);
+  if (strengthErr) {
+    throw new Error(strengthErr);
   }
 
   const nextHash = hashPassword(trimmedPwd);
@@ -722,7 +871,7 @@ export async function resetPasswordWithRecoveryToken(
   if (payload.userId) {
     const updated = await db
       .update(users)
-      .set({ passwordHash: nextHash })
+      .set({ passwordHash: nextHash, mustChangePassword: false })
       .where(eq(users.id, payload.userId))
       .returning();
     updatedUser = updated[0] ?? null;
@@ -731,14 +880,14 @@ export async function resetPasswordWithRecoveryToken(
   if (payload.staffId) {
     await db
       .update(staffTeachers)
-      .set({ passwordHash: nextHash })
+      .set({ passwordHash: nextHash, mustChangePassword: false })
       .where(eq(staffTeachers.id, payload.staffId));
   }
 
   if (payload.schoolId) {
     await db
       .update(staffTeachers)
-      .set({ passwordHash: nextHash })
+      .set({ passwordHash: nextHash, mustChangePassword: false })
       .where(
         and(
           eq(staffTeachers.schoolId, payload.schoolId),
@@ -748,7 +897,7 @@ export async function resetPasswordWithRecoveryToken(
   } else {
     await db
       .update(staffTeachers)
-      .set({ passwordHash: nextHash })
+      .set({ passwordHash: nextHash, mustChangePassword: false })
       .where(sql`lower(${staffTeachers.email}) = ${cleanEmail}`);
   }
 
@@ -774,10 +923,11 @@ export async function resetPasswordWithRecoveryToken(
           schoolId: st.schoolId,
           schoolRole: normalizeUserRole(st.role),
           active: st.active,
+          mustChangePassword: false,
         })
         .onConflictDoUpdate({
           target: users.uid,
-          set: { passwordHash: nextHash },
+          set: { passwordHash: nextHash, mustChangePassword: false },
         })
         .returning();
       updatedUser = inserted[0] ?? null;
@@ -792,4 +942,70 @@ export async function resetPasswordWithRecoveryToken(
     schoolId: payload.schoolId,
     role: updatedUser?.schoolRole ?? 'school_user',
   };
+}
+
+export async function changeAuthenticatedUserPassword(params: {
+  uid: string;
+  email: string;
+  schoolId: string | null;
+  currentPassword: string;
+  newPassword: string;
+}): Promise<AuthSessionProfile> {
+  const { uid, email, schoolId, currentPassword, newPassword } = params;
+  const strengthErr = validatePasswordStrength(newPassword);
+  if (strengthErr) {
+    throw new AuthValidationError(strengthErr, 400);
+  }
+
+  const userRows = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
+  const userRow = userRows[0];
+  if (!userRow) {
+    throw new AuthValidationError('User account not found.', 404);
+  }
+
+  if (!verifyPassword(currentPassword, userRow.passwordHash)) {
+    throw new AuthValidationError('Current password is incorrect.', 401);
+  }
+
+  if (currentPassword.trim() === newPassword.trim()) {
+    throw new AuthValidationError('New password must be different from your current password.', 400);
+  }
+
+  const nextHash = hashPassword(newPassword.trim());
+  const cleanEmail = email.trim().toLowerCase();
+
+  const updated = await db
+    .update(users)
+    .set({ passwordHash: nextHash, mustChangePassword: false })
+    .where(eq(users.id, userRow.id))
+    .returning();
+
+  if (schoolId) {
+    await db
+      .update(staffTeachers)
+      .set({ passwordHash: nextHash, mustChangePassword: false })
+      .where(
+        and(
+          eq(staffTeachers.schoolId, schoolId),
+          or(
+            userRow.staffId
+              ? sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${userRow.staffId.toLowerCase()}`
+              : sql`false`,
+            sql`lower(trim(${staffTeachers.email})) = ${cleanEmail}`
+          )
+        )
+      );
+  }
+
+  let schoolCode: string | null = null;
+  if (schoolId) {
+    const sch = await db
+      .select({ schoolCode: schools.schoolCode })
+      .from(schools)
+      .where(eq(schools.id, schoolId))
+      .limit(1);
+    schoolCode = sch[0]?.schoolCode ?? null;
+  }
+
+  return toProfile(updated[0], schoolCode);
 }

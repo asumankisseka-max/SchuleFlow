@@ -45,6 +45,7 @@ export interface UserAccount {
   password: string;
   role: UserRole;
   active: boolean;
+  mustChangePassword?: boolean;
   phone?: string;
   assignedClassIds: string[];
   assignedSubjectIds: string[];
@@ -71,6 +72,7 @@ export interface SubjectDefinition {
   maxMarks: number;
   passMark: number;
   competencies: string[];
+  archived?: boolean;
 }
 
 export interface SubjectCombination {
@@ -90,6 +92,7 @@ export interface StreamClass {
   classTeacherId: string;
   subjectIds: string[];
   subjectTeacherMap: Record<string, string>; // subjectId -> userId
+  archived?: boolean;
 }
 
 export type StudentStatus = 'active' | 'transferred' | 'inactive';
@@ -124,6 +127,7 @@ export interface ExaminationPeriod {
   submissionDeadline: string;
   locked: boolean;
   published: boolean;
+  archived?: boolean;
   createdAt: string;
 }
 
@@ -163,6 +167,7 @@ export interface MarksheetRecord {
   approvedAt?: string;
   approvedBy?: string;
   dosComment?: string;
+  version?: number;
   lastModified: string;
   auditHistory: MarksheetAuditEntry[];
 }
@@ -339,6 +344,7 @@ export interface AuthSessionProfile {
   schoolId: string | null;
   schoolRole: UserRole;
   active: boolean;
+  mustChangePassword?: boolean;
 }
 
 export interface SchoolDatabase {

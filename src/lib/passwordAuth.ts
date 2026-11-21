@@ -17,12 +17,40 @@ export interface LocalSessionPayload {
   exp: number;
 }
 
+let warnedMissingSecret = false;
+
 function getSessionSecret(): string {
-  return (
-    process.env.SESSION_SECRET ||
-    process.env.DATABASE_URL ||
-    'schuleflow-uganda-tenant-session-secret'
-  );
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (configured && configured.length >= 16) {
+    return configured;
+  }
+
+  const isProd = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE;
+  if (isProd) {
+    throw new Error(
+      'Security misconfiguration: SESSION_SECRET (at least 16 characters) must be set in production.'
+    );
+  }
+
+  if (!warnedMissingSecret) {
+    warnedMissingSecret = true;
+    console.warn(
+      'Warning: SESSION_SECRET is not configured. Using development fallback secret; set SESSION_SECRET before production deployment.'
+    );
+  }
+
+  return process.env.DATABASE_URL || 'schuleflow-dev-only-session-secret';
+}
+
+export function validatePasswordStrength(password: string): string | null {
+  const trimmed = password.trim();
+  if (trimmed.length < 8) {
+    return 'Password must be at least 8 characters long.';
+  }
+  if (!/[A-Za-z]/.test(trimmed) || !/[0-9]/.test(trimmed)) {
+    return 'Password must include at least one letter and one number.';
+  }
+  return null;
 }
 
 export function hashPassword(password: string): string {

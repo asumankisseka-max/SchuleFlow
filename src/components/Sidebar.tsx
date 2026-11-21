@@ -13,6 +13,7 @@ import {
   FileText,
   GraduationCap,
   History,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   PanelLeftClose,
@@ -41,6 +42,7 @@ interface SidebarProps {
   returnedCount: number;
   mobileOpen: boolean;
   onCloseMobile: () => void;
+  onChangePassword?: () => void;
   onLogout: () => void;
 }
 
@@ -110,6 +112,7 @@ export function Sidebar({
   returnedCount,
   mobileOpen,
   onCloseMobile,
+  onChangePassword,
   onLogout,
 }: SidebarProps) {
   const normalizedRole = normalizeUserRole(currentUser.role);
@@ -323,6 +326,24 @@ export function Sidebar({
                 {currentUser.staffId ? ` · ${currentUser.staffId}` : ''}
               </p>
             </div>
+          )}
+
+          {onChangePassword && (
+            <button
+              type="button"
+              onClick={() => {
+                onChangePassword();
+                if (isMobileDrawer) onCloseMobile();
+              }}
+              title={isCompact ? 'Change Password' : undefined}
+              aria-label="Change Password"
+              className={`flex items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-100 hover:text-slate-900 transition-colors whitespace-nowrap min-h-[36px] ${
+                isCompact ? 'w-10 h-9 p-0' : 'w-full px-3 py-1.5'
+              }`}
+            >
+              <KeyRound className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              {!isCompact && <span>Change Password</span>}
+            </button>
           )}
 
           <button

@@ -11,6 +11,7 @@ import {
   Loader2,
   LogOut,
   Plus,
+  Receipt,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -164,6 +165,22 @@ export function PlatformAdminView({
       setNotice(`Updated ${school.name} package to ${planLabel} (${nextQuota} seats).`);
     } catch (err: unknown) {
       setErrorBanner(err instanceof Error ? err.message : 'Failed to change school package.');
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleGenerateInvoice = async (school: SchoolTenant) => {
+    setBusyId(school.id);
+    setErrorBanner(null);
+    try {
+      const res = await platformApi.generateSchoolInvoice(school.id);
+      await onRefreshPlatform();
+      setNotice(
+        `Issued invoice ${res.invoice.id} for ${school.name} (${res.invoice.termName} ${res.invoice.academicYear} · UGX ${res.invoice.totalAmountUgx.toLocaleString()} · ${res.invoice.activeStudentsCount} active students).`
+      );
+    } catch (err: unknown) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to issue school invoice.');
     } finally {
       setBusyId(null);
     }
@@ -448,6 +465,16 @@ export function PlatformAdminView({
                           >
                             <RefreshCw className="h-3 w-3" />
                             <span>Renew +1 Yr</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={busyId === school.id}
+                            onClick={() => void handleGenerateInvoice(school)}
+                            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-100 whitespace-nowrap"
+                          >
+                            <Receipt className="h-3 w-3" />
+                            <span>Issue Invoice</span>
                           </button>
 
                           {effectiveStatus !== 'active' && (

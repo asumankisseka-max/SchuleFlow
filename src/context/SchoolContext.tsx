@@ -38,7 +38,6 @@ export interface CredentialSignInParams {
   schoolCode?: string;
   identifier: string;
   password: string;
-  mode?: 'school' | 'super_admin';
   rememberMe?: boolean;
 }
 
@@ -147,6 +146,7 @@ interface SchoolContextValue {
   authProfile: AuthSessionProfile | null;
   authLoading: boolean;
   authError: string | null;
+  authErrorCode: string | null;
   schools: SchoolTenant[];
   auditLogs: AuditLogRecord[];
   activeSchoolId: string | null;
@@ -162,9 +162,11 @@ interface SchoolContextValue {
   loadingWorkspace: boolean;
   workspaceError: string | null;
   recentAccounts: RememberedAccountHint[];
+  clearAuthError: () => void;
   removeRecentAccount: (identifier: string, schoolId: string | null) => void;
-  signInWithCredentials: (params: CredentialSignInParams) => Promise<void>;
+  signInWithCredentials: (params: CredentialSignInParams) => Promise<boolean>;
   signOutWorkspace: () => Promise<void>;
+  completePasswordChange: (token: string, updatedUser: AuthSessionProfile) => void;
   refreshPlatformData: () => Promise<void>;
   refreshTenantWorkspace: (schoolId?: string) => Promise<void>;
   refreshSubscriptionPortal: (schoolId?: string) => Promise<void>;
@@ -180,6 +182,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   const [authProfile, setAuthProfile] = useState<AuthSessionProfile | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [authErrorCode, setAuthErrorCode] = useState<string | null>(null);
 
   const [schools, setSchools] = useState<SchoolTenant[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLogRecord[]>([]);
@@ -478,14 +481,19 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     };
   }, [applyAuthenticatedSession, getValidToken]);
 
+  const clearAuthError = useCallback(() => {
+    setAuthError(null);
+    setAuthErrorCode(null);
+  }, []);
+
   const signInWithCredentials = useCallback(
-    async (params: CredentialSignInParams) => {
+    async (params: CredentialSignInParams): Promise<boolean> => {
       const trimmedIdentifier = params.identifier.trim();
       const trimmedSchoolCode = params.schoolCode?.trim().toUpperCase() || undefined;
-      const mode = params.mode ?? 'school';
       const rememberMe = params.rememberMe ?? true;
 
       setAuthError(null);
+      setAuthErrorCode(null);
       setAuthLoading(true);
       try {
         localTokenRef.current = null;
@@ -493,22 +501,24 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         configureApiClient(async () => null, null);
 
         const res = await platformApi.loginWithCredentials({
-          schoolCode: mode === 'school' ? trimmedSchoolCode : undefined,
+          ...(trimmedSchoolCode ? { schoolCode: trimmedSchoolCode } : {}),
           identifier: trimmedIdentifier,
           password: params.password,
-          mode,
         });
 
         localTokenRef.current = res.token;
         saveStoredToken(res.token, rememberMe);
         configureApiClient(getValidToken, null);
         await applyAuthenticatedSession(res.user, res.schools, trimmedIdentifier);
+        return true;
       } catch (err: unknown) {
         localTokenRef.current = null;
         clearStoredToken();
         setAuthProfile(null);
         setDb(null);
         setAuthError(formatFriendlyAuthError(err));
+        setAuthErrorCode(err instanceof ApiError ? err.code ?? null : null);
+        return false;
       } finally {
         setAuthLoading(false);
       }
@@ -529,11 +539,36 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     setSubscriptionPortalData(null);
     setWorkspaceError(null);
     setAuthError(null);
+    setAuthErrorCode(null);
     await platformApi.logoutSession().catch(() => undefined);
     if (typeof window !== 'undefined' && window.location.pathname !== '/') {
       window.history.pushState({}, '', '/');
     }
   }, []);
+
+  const completePasswordChange = useCallback(
+    (token: string, updatedUser: AuthSessionProfile) => {
+      const hasLocalStorageToken =
+        typeof window !== 'undefined' && Boolean(window.localStorage.getItem(SESSION_STORAGE_KEY));
+      localTokenRef.current = token;
+      saveStoredToken(token, hasLocalStorageToken);
+      authProfileRef.current = updatedUser;
+      setAuthProfile(updatedUser);
+      setDb((prev) =>
+        prev
+          ? {
+              ...prev,
+              users: prev.users.map((u) =>
+                u.email.toLowerCase() === updatedUser.email.toLowerCase()
+                  ? { ...u, mustChangePassword: false }
+                  : u
+              ),
+            }
+          : prev
+      );
+    },
+    []
+  );
 
   const refreshPlatformData = useCallback(async () => {
     if (!authProfile || authProfile.globalRole !== 'super_admin') return;
@@ -607,6 +642,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     authProfile,
     authLoading,
     authError,
+    authErrorCode,
     schools,
     auditLogs,
     activeSchoolId,
@@ -619,9 +655,11 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     loadingWorkspace,
     workspaceError,
     recentAccounts,
+    clearAuthError,
     removeRecentAccount,
     signInWithCredentials,
     signOutWorkspace,
+    completePasswordChange,
     refreshPlatformData,
     refreshTenantWorkspace,
     refreshSubscriptionPortal,

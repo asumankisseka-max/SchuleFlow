@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, BookOpenCheck, Loader2, Menu } from 'lucide-react';
 import { AcademicHistoryView } from './components/AcademicHistoryView';
 import { BillingView } from './components/BillingView';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { ClassesView } from './components/ClassesView';
 import { DashboardView } from './components/DashboardView';
 import { ExaminationsView } from './components/ExaminationsView';
@@ -18,6 +19,7 @@ import { SubjectsView } from './components/SubjectsView';
 import { TeachersView } from './components/TeachersView';
 import { UserManagementView } from './components/UserManagementView';
 import { useSchoolContext } from './context/SchoolContext';
+import { ApiError } from './utils/apiClient';
 import type {
   CurriculumScope,
   ExaminationPeriod,
@@ -85,6 +87,7 @@ export default function App() {
     authProfile,
     authLoading,
     authError,
+    authErrorCode,
     schools,
     auditLogs,
     activeSchoolId,
@@ -95,9 +98,11 @@ export default function App() {
     loadingWorkspace,
     workspaceError,
     recentAccounts,
+    clearAuthError,
     removeRecentAccount,
     signInWithCredentials,
     signOutWorkspace,
+    completePasswordChange,
     refreshPlatformData,
     refreshTenantWorkspace,
     refreshSubscriptionPortal,
@@ -108,9 +113,11 @@ export default function App() {
 
   const [activeExamId, setActiveExamId] = useState<string>('');
   const [activeClassId, setActiveClassId] = useState<string>('');
+  const [activeSubjectId, setActiveSubjectId] = useState<string>('');
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('dashboard');
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [changePwdOpen, setChangePwdOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [initialBootDone, setInitialBootDone] = useState(false);
@@ -199,9 +206,14 @@ export default function App() {
   // Reset class/exam/student selection cleanly whenever switching school tenants
   useEffect(() => {
     setSelectedStudentId(null);
+    setActiveSubjectId('');
     if (db) {
-      setActiveExamId(db.exams[db.exams.length - 1]?.id ?? '');
-      setActiveClassId(db.classes[0]?.id ?? '');
+      const nonArchivedExams = db.exams.filter((e) => !e.archived);
+      const examPool = nonArchivedExams.length > 0 ? nonArchivedExams : db.exams;
+      const nonArchivedClasses = db.classes.filter((c) => !c.archived);
+      const classPool = nonArchivedClasses.length > 0 ? nonArchivedClasses : db.classes;
+      setActiveExamId(examPool[examPool.length - 1]?.id ?? '');
+      setActiveClassId(classPool[0]?.id ?? '');
     } else {
       setActiveExamId('');
       setActiveClassId('');
@@ -225,20 +237,34 @@ export default function App() {
 
   const scopedClasses = useMemo(() => {
     if (!db) return [];
-    const filtered = db.classes.filter((c) =>
+    const activeOnly = db.classes.filter((c) => !c.archived);
+    const pool = activeOnly.length > 0 ? activeOnly : db.classes;
+    const filtered = pool.filter((c) =>
       effectiveCurriculumScope === 'olevel_only'
         ? c.level === 'olevel'
         : effectiveCurriculumScope === 'alevel_only'
           ? c.level === 'alevel'
           : true
     );
-    return filtered.length > 0 ? filtered : db.classes;
+    return filtered.length > 0 ? filtered : pool;
   }, [db, effectiveCurriculumScope]);
 
+  const activeExams = useMemo(() => {
+    if (!db) return [];
+    const nonArchived = db.exams.filter((e) => !e.archived);
+    return nonArchived.length > 0 ? nonArchived : db.exams;
+  }, [db]);
+
+  const activeSubjects = useMemo(() => {
+    if (!db) return [];
+    const nonArchived = db.subjects.filter((s) => !s.archived);
+    return nonArchived.length > 0 ? nonArchived : db.subjects;
+  }, [db]);
+
   const activeExam = useMemo(() => {
-    if (!db || db.exams.length === 0) return null;
-    return db.exams.find((e) => e.id === activeExamId) ?? db.exams[db.exams.length - 1];
-  }, [db, activeExamId]);
+    if (activeExams.length === 0) return null;
+    return activeExams.find((e) => e.id === activeExamId) ?? activeExams[activeExams.length - 1];
+  }, [activeExams, activeExamId]);
 
   const activeClass = useMemo(() => {
     if (scopedClasses.length === 0) return null;
@@ -274,23 +300,44 @@ export default function App() {
       <LoginView
         loading={authLoading}
         error={authError}
+        errorCode={authErrorCode}
         recentAccounts={recentAccounts}
+        onClearError={clearAuthError}
         onRemoveRecentAccount={removeRecentAccount}
         onCredentialSignIn={signInWithCredentials}
       />
     );
   }
 
+  const changePasswordModalNode = (
+    <ChangePasswordModal
+      open={Boolean(authProfile.mustChangePassword || changePwdOpen)}
+      required={Boolean(authProfile.mustChangePassword)}
+      userEmail={authProfile.email}
+      userName={authProfile.name}
+      onClose={() => setChangePwdOpen(false)}
+      onLogout={() => void signOutWorkspace()}
+      onPasswordChanged={(token, updatedUser) => {
+        completePasswordChange(token, updatedUser);
+        setChangePwdOpen(false);
+        setNotice('Personal password updated.');
+      }}
+    />
+  );
+
   // Strict Super Admin Isolation: /platform/dashboard only (no internal school marks or grading)
   if (authProfile.globalRole === 'super_admin') {
     return (
-      <PlatformAdminView
-        authProfile={authProfile}
-        schools={schools}
-        auditLogs={auditLogs}
-        onRefreshPlatform={refreshPlatformData}
-        onLogout={signOutWorkspace}
-      />
+      <>
+        <PlatformAdminView
+          authProfile={authProfile}
+          schools={schools}
+          auditLogs={auditLogs}
+          onRefreshPlatform={refreshPlatformData}
+          onLogout={signOutWorkspace}
+        />
+        {changePasswordModalNode}
+      </>
     );
   }
 
@@ -388,6 +435,7 @@ export default function App() {
             onLogout={() => void signOutWorkspace()}
           />
         </main>
+        {changePasswordModalNode}
       </div>
     );
   }
@@ -490,21 +538,34 @@ export default function App() {
   };
 
   const applyMarksheetMutation = async (updated: MarksheetRecord, successMsg: string) => {
-    updateLocalTenantDb((prev) => {
-      const idx = prev.marksheets.findIndex(
-        (m) =>
-          m.examId === updated.examId &&
-          m.classId === updated.classId &&
-          m.subjectId === updated.subjectId
-      );
-      const nextSheets =
-        idx >= 0
-          ? prev.marksheets.map((m, i) => (i === idx ? updated : m))
-          : [...prev.marksheets, updated];
-      return { ...prev, marksheets: nextSheets };
-    });
-    setNotice(successMsg);
-    await runPersist(() => tenantApi.saveMarksheet(updated), 'Failed to persist marksheet.');
+    setErrorBanner(null);
+    try {
+      const res = await tenantApi.saveMarksheet(updated);
+      const saved = res.marksheet ?? updated;
+      updateLocalTenantDb((prev) => {
+        const idx = prev.marksheets.findIndex(
+          (m) =>
+            m.examId === saved.examId &&
+            m.classId === saved.classId &&
+            m.subjectId === saved.subjectId
+        );
+        const nextSheets =
+          idx >= 0
+            ? prev.marksheets.map((m, i) => (i === idx ? saved : m))
+            : [...prev.marksheets, saved];
+        return { ...prev, marksheets: nextSheets };
+      });
+      setNotice(successMsg);
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.status === 409) {
+        setErrorBanner(
+          `${err.message} Refreshing latest marksheet version from server...`
+        );
+        void refreshTenantWorkspace();
+        return;
+      }
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to persist marksheet.');
+    }
   };
 
   const handleSaveMarksheetEntries = (
@@ -639,6 +700,7 @@ export default function App() {
         returnedCount={returnedForTeacherCount}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
+        onChangePassword={() => setChangePwdOpen(true)}
         onLogout={() => void signOutWorkspace()}
       />
 
@@ -695,7 +757,7 @@ export default function App() {
         {/* Contextual Exam & Class Switcher (Shown only on exam/marks/report pages) */}
         {currentUser.role !== 'bursar' &&
           EXAM_CONTEXT_TABS.has(effectiveTab) &&
-          db.exams.length > 0 && (
+          activeExams.length > 0 && (
             <div className="bg-white/90 border-b border-slate-200 px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 no-print">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center gap-2">
@@ -711,7 +773,7 @@ export default function App() {
                     onChange={(e) => setActiveExamId(e.target.value)}
                     className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-900 focus:border-blue-800 focus:outline-none"
                   >
-                    {db.exams.map((ex) => (
+                    {activeExams.map((ex) => (
                       <option key={ex.id} value={ex.id}>
                         {ex.name} · {ex.academicYear}
                       </option>
@@ -730,7 +792,10 @@ export default function App() {
                     <select
                       id="workspace-class"
                       value={activeClass?.id ?? ''}
-                      onChange={(e) => setActiveClassId(e.target.value)}
+                      onChange={(e) => {
+                        setActiveClassId(e.target.value);
+                        setActiveSubjectId('');
+                      }}
                       className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-900 focus:border-blue-800 focus:outline-none"
                     >
                       {scopedClasses.map((cls) => (
@@ -788,8 +853,9 @@ export default function App() {
               activeExam={activeExam}
               curriculumScope={effectiveCurriculumScope}
               onNavigate={safeNavigate}
-              onSelectClassAndNavigate={(cid, tab) => {
+              onSelectClassAndNavigate={(cid, tab, sid) => {
                 setActiveClassId(cid);
+                setActiveSubjectId(sid ?? '');
                 safeNavigate(tab);
               }}
             />
@@ -839,6 +905,20 @@ export default function App() {
                   }));
                   setNotice(`Updated record for ${saved.fullName}.`);
                 }, 'Failed to update student.');
+              }}
+              onDeleteStudent={(studentId: string) => {
+                void runPersist(async () => {
+                  await tenantApi.deleteStudent(studentId);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    students: prev.students.filter((s) => s.id !== studentId),
+                  }));
+                  setNotice('Student removed from directory.');
+                }, 'Failed to delete student.');
+              }}
+              onUploadStudentPhoto={async (studentId: string, dataUrl: string) => {
+                const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
+                return res.url;
               }}
               onBulkPromote={(ids, targetClassId) => {
                 updateLocalTenantDb((prev) => ({
@@ -897,6 +977,27 @@ export default function App() {
                 }));
                 void runPersist(() => tenantApi.saveClass(cls), 'Failed to update class.');
               }}
+              onArchiveOrDeleteClass={(classId, mode) => {
+                void runPersist(async () => {
+                  await tenantApi.deleteOrArchiveClass(classId, mode);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    classes:
+                      mode === 'delete'
+                        ? prev.classes.filter((c) => c.id !== classId)
+                        : prev.classes.map((c) =>
+                            c.id === classId ? { ...c, archived: mode === 'archive' } : c
+                          ),
+                  }));
+                  setNotice(
+                    mode === 'delete'
+                      ? 'Class deleted permanently.'
+                      : mode === 'archive'
+                        ? 'Class archived.'
+                        : 'Class restored to active workspace.'
+                  );
+                }, `Failed to ${mode} class.`);
+              }}
               onAddCombination={(combo: SubjectCombination) => {
                 updateLocalTenantDb((prev) => ({
                   ...prev,
@@ -939,14 +1040,35 @@ export default function App() {
                 setNotice(`Updated subject ${sub.name}.`);
                 void runPersist(() => tenantApi.saveSubject(sub), 'Failed to update subject.');
               }}
+              onArchiveOrDeleteSubject={(subjectId, mode) => {
+                void runPersist(async () => {
+                  await tenantApi.deleteOrArchiveSubject(subjectId, mode);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    subjects:
+                      mode === 'delete'
+                        ? prev.subjects.filter((s) => s.id !== subjectId)
+                        : prev.subjects.map((s) =>
+                            s.id === subjectId ? { ...s, archived: mode === 'archive' } : s
+                          ),
+                  }));
+                  setNotice(
+                    mode === 'delete'
+                      ? 'Subject deleted permanently.'
+                      : mode === 'archive'
+                        ? 'Subject archived.'
+                        : 'Subject restored to active curriculum.'
+                  );
+                }, `Failed to ${mode} subject.`);
+              }}
             />
           )}
 
           {effectiveTab === 'teachers' && activeExam && (
             <TeachersView
               users={db.users}
-              classes={db.classes}
-              subjects={db.subjects}
+              classes={scopedClasses}
+              subjects={activeSubjects}
               marksheets={db.marksheets}
               activeExam={activeExam}
             />
@@ -956,7 +1078,7 @@ export default function App() {
             <ExaminationsView
               exams={db.exams}
               activeExamId={activeExam.id}
-              classes={db.classes}
+              classes={scopedClasses}
               marksheets={db.marksheets}
               academicYear={db.settings.academicYear}
               termName={db.settings.termName}
@@ -976,6 +1098,27 @@ export default function App() {
                 setNotice(`Updated "${ex.name}".`);
                 void runPersist(() => tenantApi.saveExam(ex), 'Failed to update examination.');
               }}
+              onArchiveOrDeleteExam={(examId, mode) => {
+                void runPersist(async () => {
+                  await tenantApi.deleteOrArchiveExam(examId, mode);
+                  updateLocalTenantDb((prev) => ({
+                    ...prev,
+                    exams:
+                      mode === 'delete'
+                        ? prev.exams.filter((e) => e.id !== examId)
+                        : prev.exams.map((e) =>
+                            e.id === examId ? { ...e, archived: mode === 'archive' } : e
+                          ),
+                  }));
+                  setNotice(
+                    mode === 'delete'
+                      ? 'Examination period deleted permanently.'
+                      : mode === 'archive'
+                        ? 'Examination archived.'
+                        : 'Examination restored.'
+                  );
+                }, `Failed to ${mode} examination.`);
+              }}
             />
           )}
 
@@ -985,12 +1128,16 @@ export default function App() {
               activeExam={activeExam}
               activeClass={activeClass}
               classes={scopedClasses}
-              subjects={db.subjects}
+              subjects={activeSubjects}
               combinations={db.combinations}
               students={db.students}
               marksheets={db.marksheets}
               settings={db.settings}
-              onSelectClass={setActiveClassId}
+              initialSubjectId={activeSubjectId}
+              onSelectClass={(cid) => {
+                setActiveClassId(cid);
+                setActiveSubjectId('');
+              }}
               onSaveMarksheetEntries={handleSaveMarksheetEntries}
               onSubmitMarksheet={handleSubmitMarksheet}
             />
@@ -1001,7 +1148,7 @@ export default function App() {
               currentUser={currentUser}
               activeExam={activeExam}
               classes={scopedClasses}
-              subjects={db.subjects}
+              subjects={activeSubjects}
               students={db.students}
               users={db.users}
               marksheets={db.marksheets}
@@ -1082,6 +1229,14 @@ export default function App() {
                   'Failed to save student photo.'
                 );
               }}
+              onUploadStudentPhoto={async (studentId, dataUrl) => {
+                const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
+                return res.url;
+              }}
+              onUploadSchoolLogo={async (dataUrl) => {
+                const res = await tenantApi.uploadMedia('logos', dataUrl, 'school-logo');
+                return res.url;
+              }}
               onIncrementReportsPrinted={(count) => {
                 updateLocalTenantDb((prev) => ({
                   ...prev,
@@ -1113,7 +1268,18 @@ export default function App() {
             <SettingsView
               settings={db.settings}
               curriculumScope={effectiveCurriculumScope}
+              schoolCode={activeSchool?.schoolCode ?? authProfile.schoolCode ?? undefined}
               db={db}
+              onUploadLogo={async (dataUrl) => {
+                const res = await tenantApi.uploadMedia('logos', dataUrl, 'school-logo');
+                return res.url;
+              }}
+              onGetMediaStatus={() => tenantApi.getMediaStatus()}
+              onMigrateMedia={async () => {
+                const res = await tenantApi.migrateMedia();
+                await refreshTenantWorkspace();
+                return res;
+              }}
               onUpdateSettings={(updated) => {
                 const resolvedLogo =
                   updated.badgeDataUrl !== undefined
@@ -1226,13 +1392,26 @@ export default function App() {
                   );
                 }, 'Failed to update staff account.');
               }}
-              onResetPassword={() => {
-                setNotice('Assign a new password in the edit form and click Save Account.');
+              onResetPassword={async (userId) => {
+                const res = await tenantApi.resetStaffPassword(userId);
+                updateLocalTenantDb((prev) => ({
+                  ...prev,
+                  users: prev.users.map((u) =>
+                    u.id === userId ? { ...u, mustChangePassword: true } : u
+                  ),
+                }));
+                setNotice(`Issued temporary password for ${res.name}.`);
+                return {
+                  temporaryPassword: res.temporaryPassword,
+                  staffId: res.staffId,
+                  name: res.name,
+                };
               }}
             />
           )}
         </main>
       </div>
+      {changePasswordModalNode}
     </div>
   );
 }

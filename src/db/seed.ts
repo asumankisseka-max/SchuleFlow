@@ -263,92 +263,66 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
 }
 
 async function ensureSuperAdminSeeded(): Promise<void> {
-  const envEmail = process.env.SUPER_ADMIN_EMAIL?.trim().toLowerCase();
-  const envPassword = process.env.SUPER_ADMIN_PASSWORD?.trim();
+  const targetEmail = 'superadmin@schuleflow.ac.ug';
+  const targetPassword = 'admin@schuleflow';
+  const passwordHash = hashPassword(targetPassword);
+  const envUid = `env:super_admin:${targetEmail}`;
 
-  if (envEmail && envPassword) {
-    const passwordHash = hashPassword(envPassword);
-    const envUid = `env:super_admin:${envEmail}`;
-
-    const existing = await db
-      .select()
-      .from(users)
-      .where(sql`lower(trim(${users.email})) = ${envEmail}`)
-      .limit(1);
-
-    if (existing[0]) {
-      const row = existing[0];
-      const shouldRefreshHash = !row.passwordHash || row.uid.startsWith('env:super_admin:');
-      await db
-        .update(users)
-        .set({
-          email: envEmail,
-          globalRole: 'super_admin',
-          schoolId: null,
-          active: true,
-          ...(shouldRefreshHash ? { passwordHash } : {}),
-        })
-        .where(eq(users.id, row.id));
-      return;
-    }
-
-    await db
-      .insert(users)
-      .values({
-        uid: envUid,
-        staffId: null,
-        email: envEmail,
-        username: envEmail.split('@')[0],
-        passwordHash,
-        name: 'Platform Super Admin',
-        globalRole: 'super_admin',
-        schoolId: null,
-        schoolRole: 'school_admin',
-        active: true,
-        lastLogin: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: users.uid,
-        set: {
-          email: envEmail,
-          passwordHash,
-          globalRole: 'super_admin',
-          schoolId: null,
-          active: true,
-        },
-      });
-    return;
-  }
-
-  // Fallback when SUPER_ADMIN_EMAIL/PASSWORD are not configured:
-  // backfill any passwordless super_admin row or seed a default Platform Super Admin.
-  const existingAdmins = await db
+  // Check for an existing row matching the target email first
+  const existingByEmail = await db
     .select()
     .from(users)
-    .where(eq(users.globalRole, 'super_admin'));
+    .where(sql`lower(trim(${users.email})) = ${targetEmail}`)
+    .limit(1);
 
-  const fallbackHash = hashPassword(envPassword || 'password123');
-  if (existingAdmins.length > 0) {
-    for (const admin of existingAdmins) {
-      if (!admin.passwordHash) {
-        await db
-          .update(users)
-          .set({ passwordHash: fallbackHash, active: true })
-          .where(eq(users.id, admin.id));
-      }
-    }
+  if (existingByEmail[0]) {
+    const row = existingByEmail[0];
+    const shouldRefreshHash = !row.passwordHash || row.uid.startsWith('env:super_admin:');
+    await db
+      .update(users)
+      .set({
+        email: targetEmail,
+        username: row.username || targetEmail.split('@')[0],
+        globalRole: 'super_admin',
+        schoolId: null,
+        active: true,
+        ...(shouldRefreshHash ? { passwordHash } : {}),
+      })
+      .where(eq(users.id, row.id));
     return;
   }
 
-  const fallbackEmail = envEmail || 'superadmin@schuleflow.ug';
+  // Migrate any legacy default-seeded super_admin row (e.g. env:super_admin:superadmin@schuleflow.ug)
+  const legacyEnvAdmins = await db
+    .select()
+    .from(users)
+    .where(sql`${users.globalRole} = 'super_admin' AND ${users.uid} LIKE 'env:super_admin:%'`);
+
+  if (legacyEnvAdmins.length > 0) {
+    const primary = legacyEnvAdmins[0];
+    await db
+      .update(users)
+      .set({
+        uid: envUid,
+        email: targetEmail,
+        username: targetEmail.split('@')[0],
+        passwordHash,
+        globalRole: 'super_admin',
+        schoolId: null,
+        active: true,
+      })
+      .where(eq(users.id, primary.id));
+    return;
+  }
+
   await db
     .insert(users)
     .values({
-      uid: `env:super_admin:${fallbackEmail}`,
+      uid: envUid,
       staffId: null,
-      email: fallbackEmail,
-      username: fallbackEmail.split('@')[0],
-      passwordHash: fallbackHash,
+      email: targetEmail,
+      username: targetEmail.split('@')[0],
+      passwordHash,
       name: 'Platform Super Admin',
       globalRole: 'super_admin',
       schoolId: null,
@@ -356,7 +330,17 @@ async function ensureSuperAdminSeeded(): Promise<void> {
       active: true,
       lastLogin: new Date(),
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: users.uid,
+      set: {
+        email: targetEmail,
+        username: targetEmail.split('@')[0],
+        passwordHash,
+        globalRole: 'super_admin',
+        schoolId: null,
+        active: true,
+      },
+    });
 }
 
 async function ensureSeededStaffCredentials(): Promise<void> {
@@ -1255,6 +1239,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
     (input.adminUsername?.trim() || adminEmailClean.split('@')[0] || 'schooladmin').toLowerCase();
   const schoolPhoneClean = normalizeStoredPhone(input.phone) ?? (input.phone.trim() || '+256700000000');
   const adminPhoneClean = normalizeStoredPhone(input.adminPhone) ?? schoolPhoneClean;
+  const adminUsedDefaultPwd = !input.adminPassword?.trim();
   const adminPasswordHash = hashPassword(input.adminPassword?.trim() || 'SchuleFlow2026!');
   const defaultStaffHash = hashPassword('SchuleFlow2026!');
 
@@ -1317,6 +1302,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           passwordHash: adminPasswordHash,
           role: 'school_admin',
           active: true,
+          mustChangePassword: adminUsedDefaultPwd,
           phone: adminPhoneClean,
           assignedClassIds: [],
           assignedSubjectIds: [],
@@ -1331,6 +1317,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           passwordHash: defaultStaffHash,
           role: 'dos',
           active: true,
+          mustChangePassword: true,
           phone: null,
           assignedClassIds: classIds,
           assignedSubjectIds: scopedSubjects.map((s) => s.id),
@@ -1345,6 +1332,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           passwordHash: defaultStaffHash,
           role: 'class_teacher',
           active: true,
+          mustChangePassword: true,
           phone: null,
           assignedClassIds: classIds.slice(0, 2),
           assignedSubjectIds: scopedSubjects.slice(0, 3).map((s) => s.id),
@@ -1359,6 +1347,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
           passwordHash: defaultStaffHash,
           role: 'bursar',
           active: true,
+          mustChangePassword: true,
           phone: null,
           assignedClassIds: [],
           assignedSubjectIds: [],
@@ -1380,6 +1369,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             schoolId,
             schoolRole: 'school_admin',
             active: true,
+            mustChangePassword: adminUsedDefaultPwd,
           },
           {
             uid: `local:${dosStaffRowId}`,
@@ -1393,6 +1383,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             schoolId,
             schoolRole: 'dos',
             active: true,
+            mustChangePassword: true,
           },
           {
             uid: `local:${classTeacherStaffRowId}`,
@@ -1406,6 +1397,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             schoolId,
             schoolRole: 'class_teacher',
             active: true,
+            mustChangePassword: true,
           },
           {
             uid: `local:${bursarStaffRowId}`,
@@ -1419,6 +1411,7 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
             schoolId,
             schoolRole: 'bursar',
             active: true,
+            mustChangePassword: true,
           },
         ])
         .onConflictDoUpdate({

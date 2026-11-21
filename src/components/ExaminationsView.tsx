@@ -1,5 +1,14 @@
 import { useState } from 'react';
-import { CalendarClock, CheckCircle2, Lock, Plus, Unlock } from 'lucide-react';
+import {
+  Archive,
+  ArchiveRestore,
+  CalendarClock,
+  CheckCircle2,
+  Lock,
+  Plus,
+  Trash2,
+  Unlock,
+} from 'lucide-react';
 import type {
   CurriculumScope,
   ExamType,
@@ -22,6 +31,7 @@ interface ExaminationsViewProps {
   onSelectExam: (examId: string) => void;
   onAddExam: (exam: ExaminationPeriod) => void;
   onUpdateExam: (exam: ExaminationPeriod) => void;
+  onArchiveOrDeleteExam?: (examId: string, mode: 'archive' | 'restore' | 'delete') => void;
 }
 
 export function ExaminationsView({
@@ -36,6 +46,7 @@ export function ExaminationsView({
   onSelectExam,
   onAddExam,
   onUpdateExam,
+  onArchiveOrDeleteExam,
 }: ExaminationsViewProps) {
   const canManage = canApproveOrPublishResults(userRole);
   const allowOlevel = curriculumScope !== 'alevel_only';
@@ -47,6 +58,7 @@ export function ExaminationsView({
     allowOlevel && allowAlevel ? 'all' : allowOlevel ? 'olevel' : 'alevel';
 
   const [showNew, setShowNew] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
 
   const [name, setName] = useState('Midterm Assessment');
   const [examType, setExamType] = useState<ExamType>('Midterm');
@@ -92,16 +104,26 @@ export function ExaminationsView({
             Schedule BOT, Midterm, and End of Term exams, manage submission deadlines, and control lock/publish state
           </p>
         </div>
-        {canManage && (
-          <button
-            type="button"
-            onClick={() => setShowNew((v) => !v)}
-            className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>Create Examination</span>
-          </button>
-        )}
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer mr-1">
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => setShowArchived(e.target.checked)}
+            />
+            <span>Show Archived</span>
+          </label>
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => setShowNew((v) => !v)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              <span>Create Examination</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {showNew && canManage && (
@@ -236,7 +258,9 @@ export function ExaminationsView({
       )}
 
       <div className="space-y-3">
-        {exams.map((ex) => {
+        {exams
+          .filter((ex) => showArchived || !ex.archived)
+          .map((ex) => {
           const isActive = ex.id === activeExamId;
           const totalExpected = classes
             .filter((c) => ex.classIds.includes(c.id))
@@ -333,6 +357,41 @@ export function ExaminationsView({
                       <CheckCircle2 className="h-3.5 w-3.5" />
                       <span>{ex.published ? 'Published' : 'Publish Exam'}</span>
                     </button>
+
+                    {onArchiveOrDeleteExam && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onArchiveOrDeleteExam(ex.id, ex.archived ? 'restore' : 'archive')
+                          }
+                          title={ex.archived ? 'Restore examination' : 'Archive examination'}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        >
+                          {ex.archived ? (
+                            <>
+                              <ArchiveRestore className="h-3.5 w-3.5 text-emerald-700" />
+                              <span>Restore</span>
+                            </>
+                          ) : (
+                            <>
+                              <Archive className="h-3.5 w-3.5 text-amber-700" />
+                              <span>Archive</span>
+                            </>
+                          )}
+                        </button>
+                        {!ex.published && !ex.locked && examSheets.length === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => onArchiveOrDeleteExam(ex.id, 'delete')}
+                            title="Delete empty examination"
+                            className="inline-flex items-center gap-1 rounded-md border border-red-200 bg-white px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </>
+                    )}
                   </>
                 )}
               </div>

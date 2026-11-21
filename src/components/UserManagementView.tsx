@@ -43,7 +43,9 @@ interface UserManagementViewProps {
   onAddUser: (user: UserAccount) => void;
   onBulkAddUsers?: (users: UserAccount[]) => void;
   onUpdateUser: (user: UserAccount) => void;
-  onResetPassword: (userId: string) => void;
+  onResetPassword: (
+    userId: string
+  ) => Promise<{ temporaryPassword: string; staffId?: string | null; name: string } | void> | void;
 }
 
 export function UserManagementView({
@@ -71,6 +73,13 @@ export function UserManagementView({
   const [assignedSubjectIds, setAssignedSubjectIds] = useState<string[]>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [issuedTempCredential, setIssuedTempCredential] = useState<{
+    name: string;
+    staffId?: string | null;
+    temporaryPassword: string;
+  } | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserAccount | null>(null);
+  const [resetting, setResetting] = useState(false);
 
   // Bulk Excel/CSV staff upload state
   const [importRows, setImportRows] = useState<StaffDirectoryImportRow[] | null>(null);
@@ -129,9 +138,12 @@ export function UserManagementView({
     e.preventDefault();
     setFormError(null);
     if (!name.trim() || !email.trim() || !username.trim()) return;
-    if (!editingUser && password.trim().length < 6) {
-      setFormError('Initial password must be at least 6 characters.');
-      return;
+    if (!editingUser) {
+      const p = password.trim();
+      if (p.length < 8 || !/[A-Za-z]/.test(p) || !/[0-9]/.test(p)) {
+        setFormError('Initial password must be at least 8 characters and include a letter and a number.');
+        return;
+      }
     }
 
     const phoneCheck = validateUgandanPhone(phone, false);
@@ -272,6 +284,41 @@ export function UserManagementView({
         </div>
       )}
 
+      {issuedTempCredential && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 flex flex-wrap items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <p className="font-semibold">
+              Temporary Password Issued for {issuedTempCredential.name}
+              {issuedTempCredential.staffId ? ` (${issuedTempCredential.staffId})` : ''}
+            </p>
+            <p className="text-[11px] text-amber-900">
+              Share this one-time password securely. The user will be forced to set a personal password on next login.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="rounded border border-amber-300 bg-white px-2.5 py-1 font-mono font-bold text-slate-900">
+              {issuedTempCredential.temporaryPassword}
+            </span>
+            <button
+              type="button"
+              onClick={() => void copyStaffId(issuedTempCredential.temporaryPassword)}
+              className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2.5 py-1 font-medium text-amber-950 hover:bg-amber-100 whitespace-nowrap"
+            >
+              <Copy className="h-3 w-3" />
+              <span>Copy</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIssuedTempCredential(null)}
+              className="p-1 text-amber-800 hover:text-amber-950"
+              aria-label="Dismiss temporary password notice"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Users Table */}
       <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
         <div className="overflow-x-auto">
@@ -329,15 +376,18 @@ export function UserManagementView({
                   </td>
                   <td className="py-2.5 px-3">
                     <span
-                      className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium ${
-                        u.active
-                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                          : 'bg-slate-100 text-slate-600 border border-slate-200'
+                      className={`inline-flex items-center gap-1 text-[11px] font-medium ${
+                        u.active ? 'text-emerald-800' : 'text-slate-500'
                       }`}
                     >
                       {u.active ? <UserCheck className="h-3 w-3" /> : <UserX className="h-3 w-3" />}
                       {u.active ? 'Active' : 'Deactivated'}
                     </span>
+                    {u.mustChangePassword && (
+                      <div className="text-[10px] font-medium text-amber-700 mt-0.5">
+                        Password change required
+                      </div>
+                    )}
                   </td>
                   <td className="py-2.5 px-3 text-right whitespace-nowrap">
                     <div className="inline-flex items-center gap-1.5">
@@ -350,11 +400,8 @@ export function UserManagementView({
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          onResetPassword(u.id);
-                          openEdit(u);
-                        }}
-                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                        onClick={() => setResetTarget(u)}
+                        className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
                       >
                         <KeyRound className="h-3 w-3" />
                         <span>Reset Password</span>
@@ -485,10 +532,10 @@ export function UserManagementView({
                   <input
                     type="password"
                     required={!editingUser}
-                    minLength={editingUser ? undefined : 6}
+                    minLength={editingUser ? undefined : 8}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder={editingUser ? 'Leave blank to keep existing' : 'Min 6 characters'}
+                    placeholder={editingUser ? 'Leave blank to keep existing' : 'Min 8 chars (letter & number)'}
                     className="w-full rounded border border-slate-300 px-2.5 py-1.5"
                   />
                 </div>
@@ -697,6 +744,72 @@ export function UserManagementView({
                   ).length
                 }{' '}
                 Staff Members
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {resetTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white shadow-xl overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-200">
+              <h3 className="font-display text-sm font-bold text-slate-900">
+                Issue Temporary Password
+              </h3>
+              <button
+                type="button"
+                onClick={() => !resetting && setResetTarget(null)}
+                className="text-slate-400 hover:text-slate-700"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-3 text-xs text-slate-700">
+              <p>
+                Reset credentials for <strong className="text-slate-900">{resetTarget.name}</strong>
+                {resetTarget.staffId ? ` (${resetTarget.staffId})` : ''}?
+              </p>
+              <p className="text-slate-600">
+                A random one-time temporary password will be generated on the server and the account
+                will be flagged to require a personal password change immediately after next login.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-slate-50">
+              <button
+                type="button"
+                disabled={resetting}
+                onClick={() => setResetTarget(null)}
+                className="rounded-md border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={resetting}
+                onClick={async () => {
+                  setResetting(true);
+                  try {
+                    const result = await onResetPassword(resetTarget.id);
+                    if (result && result.temporaryPassword) {
+                      setIssuedTempCredential({
+                        name: result.name || resetTarget.name,
+                        staffId: result.staffId ?? resetTarget.staffId,
+                        temporaryPassword: result.temporaryPassword,
+                      });
+                    }
+                    setNotice(`Temporary password generated for ${resetTarget.name}.`);
+                    setResetTarget(null);
+                  } catch (err: unknown) {
+                    setNotice(
+                      err instanceof Error ? err.message : 'Failed to issue temporary password.'
+                    );
+                  } finally {
+                    setResetting(false);
+                  }
+                }}
+                className="rounded-md bg-blue-900 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-950 disabled:opacity-50"
+              >
+                {resetting ? 'Generating...' : 'Generate Temporary Password'}
               </button>
             </div>
           </div>

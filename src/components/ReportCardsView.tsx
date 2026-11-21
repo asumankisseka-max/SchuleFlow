@@ -6,8 +6,10 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Download,
   GraduationCap,
   LayoutTemplate,
+  Loader2,
   Printer,
   RotateCcw,
   Search,
@@ -35,6 +37,7 @@ import {
   getGradingScaleForLevel,
 } from '../utils/calculations';
 import { processStudentPhoto } from '../utils/photo';
+import { downloadReportCardsPdf } from '../utils/reportPdf';
 import { ReportCardCustomizer } from './ReportCardCustomizer';
 
 interface ReportCardsViewProps {
@@ -53,6 +56,8 @@ interface ReportCardsViewProps {
     value: string
   ) => void;
   onUpdateStudentPhoto: (studentId: string, photoDataUrl: string | undefined) => void;
+  onUploadStudentPhoto?: (studentId: string, dataUrl: string) => Promise<string>;
+  onUploadSchoolLogo?: (dataUrl: string) => Promise<string>;
   onIncrementReportsPrinted: (count: number) => void;
 }
 
@@ -247,9 +252,10 @@ function ReportCardSheet({
     field: 'classTeacherRemark' | 'dosRemark' | 'headTeacherRemark',
     value: string
   ) => void;
-  onUpdatePhoto?: (photoDataUrl: string | undefined) => void;
+  onUpdatePhoto?: (photoDataUrl: string | undefined) => Promise<void> | void;
 }) {
   const photoInputRef = useRef<HTMLInputElement | null>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
 
   const layout: ReportCardLayoutConfig = {
     ...DEFAULT_REPORT_CARD_LAYOUT,
@@ -288,11 +294,14 @@ function ReportCardSheet({
 
   const handlePhotoSelect = async (file: File) => {
     if (!onUpdatePhoto) return;
+    setUploadingPhoto(true);
     try {
       const processed = await processStudentPhoto(file);
-      onUpdatePhoto(processed);
+      await onUpdatePhoto(processed);
     } catch {
       // Ignore unreadable image
+    } finally {
+      setUploadingPhoto(false);
     }
   };
 
@@ -458,11 +467,18 @@ function ReportCardSheet({
                 />
                 <button
                   type="button"
+                  disabled={uploadingPhoto}
                   onClick={() => photoInputRef.current?.click()}
-                  className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-50"
+                  className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60"
                 >
-                  <Camera className="h-2.5 w-2.5" aria-hidden="true" />
-                  <span>{studentResult.photoDataUrl ? 'Change' : 'Upload'}</span>
+                  {uploadingPhoto ? (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Camera className="h-2.5 w-2.5" aria-hidden="true" />
+                  )}
+                  <span>
+                    {uploadingPhoto ? 'Saving...' : studentResult.photoDataUrl ? 'Change' : 'Upload'}
+                  </span>
                 </button>
                 {studentResult.photoDataUrl && (
                   <button
@@ -1086,11 +1102,14 @@ export function ReportCardsView({
   onUpdateSettings,
   onUpdateStudentRemark,
   onUpdateStudentPhoto,
+  onUploadStudentPhoto,
+  onUploadSchoolLogo,
   onIncrementReportsPrinted,
 }: ReportCardsViewProps) {
   const [search, setSearch] = useState('');
   const [printMode, setPrintMode] = useState<'single' | 'all'>('single');
   const [leftPanelTab, setLeftPanelTab] = useState<'students' | 'customize'>('students');
+  const [downloadingPdf, setDownloadingPdf] = useState<'single' | 'all' | null>(null);
 
   const scope = db.settings.curriculumScope ?? 'olevel_alevel';
   const scopedClasses = useMemo(() => {
@@ -1150,6 +1169,31 @@ export function ReportCardsView({
     setPrintMode('all');
     onIncrementReportsPrinted(orderedResults.length);
     setTimeout(() => window.print(), 60);
+  };
+
+  const handleDownloadPdf = async (mode: 'single' | 'all') => {
+    if (!activeResult) return;
+    const targets = mode === 'single' ? [activeResult] : orderedResults;
+    if (targets.length === 0) return;
+
+    setDownloadingPdf(mode);
+    try {
+      const safeBase =
+        mode === 'single'
+          ? `${activeResult.admissionNo}_${activeResult.name}_${activeExam.name}`
+          : `${activeStreamClass.name}_${activeExam.name}_Batch_Reports`;
+      const cleanName = safeBase.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '');
+      await downloadReportCardsPdf({
+        students: targets,
+        examClass,
+        summary,
+        settings: db.settings,
+        fileName: `${cleanName}.pdf`,
+      });
+      onIncrementReportsPrinted(targets.length);
+    } finally {
+      setDownloadingPdf(null);
+    }
   };
 
   if (!activeResult) {
@@ -1223,6 +1267,32 @@ export function ReportCardsView({
             >
               <LayoutTemplate className="h-3.5 w-3.5" aria-hidden="true" />
               <span>{leftPanelTab === 'customize' ? 'Done Customizing' : 'Customize Layout'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={downloadingPdf !== null}
+              onClick={() => void handleDownloadPdf('all')}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:opacity-60"
+            >
+              {downloadingPdf === 'all' ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>Batch PDF ({orderedResults.length})</span>
+            </button>
+            <button
+              type="button"
+              disabled={downloadingPdf !== null}
+              onClick={() => void handleDownloadPdf('single')}
+              className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:opacity-60"
+            >
+              {downloadingPdf === 'single' ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>Download PDF</span>
             </button>
             <button
               type="button"
@@ -1331,6 +1401,7 @@ export function ReportCardsView({
               <ReportCardCustomizer
                 compact
                 layout={{ ...DEFAULT_REPORT_CARD_LAYOUT, ...db.settings.reportLayout }}
+                onUploadLogo={onUploadSchoolLogo}
                 onChange={(updatedLayout) =>
                   onUpdateSettings({ ...db.settings, reportLayout: updatedLayout })
                 }
@@ -1348,7 +1419,16 @@ export function ReportCardsView({
               onUpdateRemark={(field, val) =>
                 onUpdateStudentRemark(activeExam.id, activeResult.studentId, field, val)
               }
-              onUpdatePhoto={(photo) => onUpdateStudentPhoto(activeResult.studentId, photo)}
+              onUpdatePhoto={async (photo) => {
+                if (!photo) {
+                  onUpdateStudentPhoto(activeResult.studentId, undefined);
+                  return;
+                }
+                const storedUrl = onUploadStudentPhoto
+                  ? await onUploadStudentPhoto(activeResult.studentId, photo)
+                  : photo;
+                onUpdateStudentPhoto(activeResult.studentId, storedUrl);
+              }}
             />
           </div>
         </div>

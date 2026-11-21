@@ -49,6 +49,8 @@ interface StudentsViewProps {
   onAddStudent: (student: StudentProfile) => void;
   onBulkAddStudents: (students: StudentProfile[]) => void;
   onUpdateStudent: (student: StudentProfile) => void;
+  onDeleteStudent?: (studentId: string) => void;
+  onUploadStudentPhoto?: (studentId: string, dataUrl: string) => Promise<string>;
   onBulkPromote: (studentIds: string[], targetClassId: string) => void;
   onViewHistory: (studentId: string) => void;
   onViewReportCard: (classId: string, studentId: string) => void;
@@ -65,6 +67,8 @@ export function StudentsView({
   onAddStudent,
   onBulkAddStudents,
   onUpdateStudent,
+  onDeleteStudent,
+  onUploadStudentPhoto,
   onBulkPromote,
   onViewHistory,
   onViewReportCard,
@@ -99,6 +103,8 @@ export function StudentsView({
   const [parentContact, setParentContact] = useState('');
   const [status, setStatus] = useState<StudentStatus>('active');
   const [photoDataUrl, setPhotoDataUrl] = useState<string | undefined>(undefined);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
   // Bulk promote selection
@@ -573,6 +579,38 @@ export function StudentsView({
                               Edit
                             </button>
                           )}
+                          {canEdit && onDeleteStudent && (
+                            confirmDeleteId === stu.id ? (
+                              <div className="inline-flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    onDeleteStudent(stu.id);
+                                    setConfirmDeleteId(null);
+                                  }}
+                                  className="rounded bg-red-700 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-800"
+                                >
+                                  Confirm
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="rounded border border-slate-200 bg-white px-1.5 py-1 text-[11px] text-slate-600"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(stu.id)}
+                                title="Delete student record (only if no marks recorded)"
+                                className="rounded border border-slate-200 bg-white p-1 text-slate-400 hover:text-red-700 hover:border-red-200"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -636,20 +674,36 @@ export function StudentsView({
                     className="hidden"
                     onChange={async (e) => {
                       const f = e.target.files?.[0];
-                      if (f) {
+                      e.currentTarget.value = '';
+                      if (!f) return;
+                      setUploadingPhoto(true);
+                      setFormError(null);
+                      try {
                         const processed = await processStudentPhoto(f);
-                        setPhotoDataUrl(processed);
+                        const entityId =
+                          editingStudent?.id ?? `stu-${admissionNo.trim() || Date.now()}`;
+                        const finalUrl = onUploadStudentPhoto
+                          ? await onUploadStudentPhoto(entityId, processed)
+                          : processed;
+                        setPhotoDataUrl(finalUrl);
+                      } catch (err) {
+                        setFormError(
+                          err instanceof Error ? err.message : 'Failed to process student photo.'
+                        );
+                      } finally {
+                        setUploadingPhoto(false);
                       }
                     }}
                   />
                   <div className="flex items-center gap-1">
                     <button
                       type="button"
+                      disabled={uploadingPhoto}
                       onClick={() => photoInputRef.current?.click()}
-                      className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-50"
+                      className="inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-0.5 text-[10px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                     >
                       <Camera className="h-3 w-3" />
-                      <span>Photo</span>
+                      <span>{uploadingPhoto ? 'Uploading...' : 'Photo'}</span>
                     </button>
                     {photoDataUrl && (
                       <button

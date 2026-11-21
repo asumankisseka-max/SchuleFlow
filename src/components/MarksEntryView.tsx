@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   AlertTriangle,
@@ -48,6 +48,7 @@ interface MarksEntryViewProps {
   students: StudentProfile[];
   marksheets: MarksheetRecord[];
   settings: SchoolSettings;
+  initialSubjectId?: string;
   onSelectClass: (classId: string) => void;
   onSaveMarksheetEntries: (
     examId: string,
@@ -74,6 +75,7 @@ export function MarksEntryView({
   students,
   marksheets,
   settings,
+  initialSubjectId,
   onSelectClass,
   onSaveMarksheetEntries,
   onSubmitMarksheet,
@@ -91,6 +93,9 @@ export function MarksEntryView({
       currentUser.assignedClassIds.includes(activeClass.id));
 
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(() => {
+    if (initialSubjectId && classSubjects.some((s) => s.id === initialSubjectId)) {
+      return initialSubjectId;
+    }
     if (isTeachingRole(currentUser.role)) {
       const assigned = classSubjects.find(
         (s) =>
@@ -101,6 +106,35 @@ export function MarksEntryView({
     }
     return classSubjects[0]?.id ?? '';
   });
+
+  useEffect(() => {
+    if (initialSubjectId && classSubjects.some((s) => s.id === initialSubjectId)) {
+      setSelectedSubjectId(initialSubjectId);
+      return;
+    }
+    if (!classSubjects.some((s) => s.id === selectedSubjectId)) {
+      if (isTeachingRole(currentUser.role)) {
+        const assigned = classSubjects.find(
+          (s) =>
+            activeClass.subjectTeacherMap[s.id] === currentUser.id ||
+            currentUser.assignedSubjectIds.includes(s.id)
+        );
+        if (assigned) {
+          setSelectedSubjectId(assigned.id);
+          return;
+        }
+      }
+      setSelectedSubjectId(classSubjects[0]?.id ?? '');
+    }
+  }, [
+    initialSubjectId,
+    classSubjects,
+    selectedSubjectId,
+    currentUser.role,
+    currentUser.id,
+    currentUser.assignedSubjectIds,
+    activeClass.subjectTeacherMap,
+  ]);
 
   const activeSubject =
     classSubjects.find((s) => s.id === selectedSubjectId) ?? classSubjects[0];
@@ -175,6 +209,7 @@ export function MarksEntryView({
       teacherId: existingSheet?.teacherId ?? currentUser.id,
       status: sheetStatus,
       entries: currentEntries,
+      version: existingSheet?.version,
       lastModified: existingSheet?.lastModified ?? new Date().toISOString(),
       auditHistory: existingSheet?.auditHistory ?? [],
     }),
@@ -376,6 +411,9 @@ export function MarksEntryView({
               Status: {sheetStatus}
             </span>
 
+            <span className="font-mono tabular-nums text-slate-500">
+              v{existingSheet?.version ?? 1}
+            </span>
             <span className="font-mono tabular-nums text-slate-600">
               Completed: <strong>{validation.completedCount}</strong>/{validation.totalStudents}
             </span>

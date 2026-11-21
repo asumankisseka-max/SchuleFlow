@@ -104,6 +104,7 @@ export const users = pgTable(
     schoolId: text('school_id').references(() => schools.id, { onDelete: 'set null' }),
     schoolRole: text('school_role').notNull().default('teacher'), // 'school_admin' | 'dos' | 'class_teacher' | 'teacher' | 'bursar' | 'headteacher'
     active: boolean('active').notNull().default(true),
+    mustChangePassword: boolean('must_change_password').notNull().default(false),
     lastLogin: timestamp('last_login').defaultNow(),
     createdAt: timestamp('created_at').defaultNow().notNull(),
   },
@@ -133,6 +134,7 @@ export const staffTeachers = pgTable(
     passwordHash: text('password_hash'),
     role: text('role').notNull(), // 'school_admin' | 'dos' | 'class_teacher' | 'teacher' | 'bursar' | 'headteacher'
     active: boolean('active').notNull().default(true),
+    mustChangePassword: boolean('must_change_password').notNull().default(false),
     phone: text('phone'),
     assignedClassIds: jsonb('assigned_class_ids').$type<string[]>().notNull().default([]),
     assignedSubjectIds: jsonb('assigned_subject_ids').$type<string[]>().notNull().default([]),
@@ -163,6 +165,7 @@ export const subjects = pgTable(
     maxMarks: integer('max_marks').notNull().default(100),
     passMark: integer('pass_mark').notNull().default(50),
     competencies: jsonb('competencies').$type<string[]>().notNull().default([]),
+    archived: boolean('archived').notNull().default(false),
   },
   (table) => [index('subjects_school_idx').on(table.schoolId)]
 );
@@ -202,6 +205,7 @@ export const classesStreams = pgTable(
       .$type<Record<string, string>>()
       .notNull()
       .default({}),
+    archived: boolean('archived').notNull().default(false),
   },
   (table) => [index('classes_school_idx').on(table.schoolId)]
 );
@@ -258,6 +262,7 @@ export const examinations = pgTable(
     submissionDeadline: text('submission_deadline').notNull(),
     locked: boolean('locked').notNull().default(false),
     published: boolean('published').notNull().default(false),
+    archived: boolean('archived').notNull().default(false),
     createdAt: text('created_at').notNull(),
   },
   (table) => [index('exams_school_idx').on(table.schoolId)]
@@ -281,6 +286,7 @@ export const marksheets = pgTable(
     approvedAt: text('approved_at'),
     approvedBy: text('approved_by'),
     dosComment: text('dos_comment'),
+    version: integer('version').notNull().default(1),
     lastModified: text('last_modified').notNull(),
     auditHistory: jsonb('audit_history').$type<MarksheetAuditEntry[]>().notNull().default([]),
   },

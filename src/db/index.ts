@@ -130,3 +130,11 @@ export const db: DrizzleDb = new Proxy({} as DrizzleDb, {
     return typeof value === 'function' ? value.bind(instance) : value;
   },
 });
+
+export async function closeDbPool(): Promise<void> {
+  if (global._postgresClient) {
+    await global._postgresClient.end({ timeout: 2 }).catch(() => undefined);
+    global._postgresClient = undefined;
+    global._drizzleDbInstance = undefined;
+  }
+}

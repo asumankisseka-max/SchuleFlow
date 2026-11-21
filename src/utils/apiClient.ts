@@ -35,9 +35,11 @@ export function configureApiClient(
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -80,7 +82,11 @@ async function requestJson<T>(
       (parsed && typeof parsed === 'object' && 'error' in parsed && typeof parsed.error === 'string'
         ? parsed.error
         : null) || `Request failed (${response.status})`;
-    throw new ApiError(errMsg, response.status);
+    const errCode =
+      parsed && typeof parsed === 'object' && 'code' in parsed && typeof parsed.code === 'string'
+        ? parsed.code
+        : undefined;
+    throw new ApiError(errMsg, response.status, errCode);
   }
 
   return parsed as T;
@@ -98,7 +104,6 @@ export const platformApi = {
     schoolCode?: string;
     identifier: string;
     password: string;
-    mode?: 'school' | 'super_admin';
   }) =>
     requestJson<{ token: string; user: AuthSessionProfile; schools: SchoolTenant[] }>(
       '/api/v1/auth/login',
@@ -116,6 +121,16 @@ export const platformApi = {
     requestJson<{ user: AuthSessionProfile; schools: SchoolTenant[] }>(
       '/api/v1/auth/sync',
       { method: 'POST' },
+      null
+    ),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    requestJson<{ token: string; user: AuthSessionProfile }>(
+      '/api/v1/auth/change-password',
+      {
+        method: 'POST',
+        body: JSON.stringify({ currentPassword, newPassword }),
+      },
       null
     ),
 
@@ -198,6 +213,13 @@ export const platformApi = {
       null
     ),
 
+  generateSchoolInvoice: (targetSchoolId: string) =>
+    requestJson<{ invoice: SubscriptionInvoice }>(
+      `/api/v1/platform/schools/${encodeURIComponent(targetSchoolId)}/invoices/generate`,
+      { method: 'POST' },
+      null
+    ),
+
   recoveryLookup: (payload: { identifier?: string; schoolCode?: string; fullName?: string }) =>
     requestJson<{
       recoveryToken: string;
@@ -263,6 +285,52 @@ export function createTenantApi(schoolId: string) {
         schoolId
       ),
 
+    listStudentsPaginated: (params?: {
+      page?: number;
+      limit?: number;
+      classId?: string;
+      status?: string;
+      search?: string;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.page) qs.set('page', String(params.page));
+      if (params?.limit) qs.set('limit', String(params.limit));
+      if (params?.classId) qs.set('classId', params.classId);
+      if (params?.status) qs.set('status', params.status);
+      if (params?.search) qs.set('search', params.search);
+      const qStr = qs.toString();
+      return requestJson<{
+        students: StudentProfile[];
+        total: number;
+        page: number;
+        limit: number;
+      }>(`${base}/students${qStr ? `?${qStr}` : ''}`, { method: 'GET' }, schoolId);
+    },
+
+    listMarksheetsFiltered: (params?: {
+      examId?: string;
+      classId?: string;
+      subjectId?: string;
+      status?: string;
+      page?: number;
+      limit?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.examId) qs.set('examId', params.examId);
+      if (params?.classId) qs.set('classId', params.classId);
+      if (params?.subjectId) qs.set('subjectId', params.subjectId);
+      if (params?.status) qs.set('status', params.status);
+      if (params?.page) qs.set('page', String(params.page));
+      if (params?.limit) qs.set('limit', String(params.limit));
+      const qStr = qs.toString();
+      return requestJson<{
+        marksheets: MarksheetRecord[];
+        total: number;
+        page: number;
+        limit: number;
+      }>(`${base}/marksheets${qStr ? `?${qStr}` : ''}`, { method: 'GET' }, schoolId);
+    },
+
     addStudents: (students: StudentProfile[]) =>
       requestJson<{ students: StudentProfile[] }>(
         `${base}/students`,
@@ -274,6 +342,13 @@ export function createTenantApi(schoolId: string) {
       requestJson<{ student: StudentProfile }>(
         `${base}/students/${encodeURIComponent(student.id)}`,
         { method: 'PUT', body: JSON.stringify(student) },
+        schoolId
+      ),
+
+    deleteStudent: (studentId: string) =>
+      requestJson<{ ok: boolean }>(
+        `${base}/students/${encodeURIComponent(studentId)}`,
+        { method: 'DELETE' },
         schoolId
       ),
 
@@ -291,10 +366,24 @@ export function createTenantApi(schoolId: string) {
         schoolId
       ),
 
+    deleteOrArchiveClass: (classId: string, mode: 'archive' | 'restore' | 'delete') =>
+      requestJson<{ mode: string; archived: boolean }>(
+        `${base}/classes/${encodeURIComponent(classId)}?mode=${mode}`,
+        { method: 'DELETE' },
+        schoolId
+      ),
+
     saveSubject: (sub: SubjectDefinition) =>
       requestJson<{ subject: SubjectDefinition }>(
         `${base}/subjects`,
         { method: 'PUT', body: JSON.stringify(sub) },
+        schoolId
+      ),
+
+    deleteOrArchiveSubject: (subjectId: string, mode: 'archive' | 'restore' | 'delete') =>
+      requestJson<{ mode: string; archived: boolean }>(
+        `${base}/subjects/${encodeURIComponent(subjectId)}?mode=${mode}`,
+        { method: 'DELETE' },
         schoolId
       ),
 
@@ -316,6 +405,13 @@ export function createTenantApi(schoolId: string) {
       requestJson<{ exam: ExaminationPeriod }>(
         `${base}/examinations`,
         { method: 'PUT', body: JSON.stringify(exam) },
+        schoolId
+      ),
+
+    deleteOrArchiveExam: (examId: string, mode: 'archive' | 'restore' | 'delete') =>
+      requestJson<{ mode: string; archived: boolean }>(
+        `${base}/examinations/${encodeURIComponent(examId)}?mode=${mode}`,
+        { method: 'DELETE' },
         schoolId
       ),
 
@@ -362,6 +458,43 @@ export function createTenantApi(schoolId: string) {
       requestJson<{ staff: UserAccount[] }>(
         `${base}/staff/bulk`,
         { method: 'POST', body: JSON.stringify({ staff }) },
+        schoolId
+      ),
+
+    resetStaffPassword: (staffRowId: string, temporaryPassword?: string) =>
+      requestJson<{
+        id: string;
+        staffId: string | null;
+        email: string;
+        name: string;
+        temporaryPassword: string;
+      }>(
+        `${base}/staff/${encodeURIComponent(staffRowId)}/reset-password`,
+        { method: 'POST', body: JSON.stringify({ temporaryPassword }) },
+        schoolId
+      ),
+
+    getMediaStatus: () =>
+      requestJson<{
+        configured: boolean;
+        bucket: string;
+        urlOrigin?: string;
+        inlineLogoCount: number;
+        inlineStudentPhotosCount: number;
+        supabaseStudentPhotosCount: number;
+      }>(`${base}/media/status`, { method: 'GET' }, schoolId),
+
+    uploadMedia: (folder: 'logos' | 'students', dataUrl: string, entityId?: string) =>
+      requestJson<{ url: string; storage: 'supabase' | 'inline'; path?: string }>(
+        `${base}/media/upload`,
+        { method: 'POST', body: JSON.stringify({ folder, entityId, dataUrl }) },
+        schoolId
+      ),
+
+    migrateMedia: () =>
+      requestJson<{ migratedLogos: number; migratedPhotos: number; skipped: number }>(
+        `${base}/media/migrate`,
+        { method: 'POST' },
         schoolId
       ),
 
