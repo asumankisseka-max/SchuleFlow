@@ -284,9 +284,29 @@ export function ExaminationsView({
                   <span className="font-mono text-xs text-slate-500">
                     {ex.term} · {ex.academicYear} · {ex.examType}
                   </span>
+                  <span className="text-slate-300" aria-hidden="true">·</span>
+                  <span
+                    className={`text-xs font-semibold ${
+                      ex.archived
+                        ? 'text-slate-500'
+                        : !ex.locked && !ex.published
+                          ? 'text-emerald-700'
+                          : ex.published
+                            ? 'text-blue-900'
+                            : 'text-amber-800'
+                    }`}
+                  >
+                    {ex.archived
+                      ? 'Archived'
+                      : !ex.locked && !ex.published
+                        ? 'In Progress (Open for Teachers)'
+                        : ex.published
+                          ? 'Final Results Published'
+                          : 'Locked'}
+                  </span>
                   {isActive && (
-                    <span className="rounded bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-900">
-                      Active Workspace Exam
+                    <span className="text-xs font-semibold text-blue-800">
+                      · Active Workspace Exam
                     </span>
                   )}
                 </div>
@@ -309,7 +329,7 @@ export function ExaminationsView({
                   <button
                     type="button"
                     onClick={() => onSelectExam(ex.id)}
-                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                    className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
                   >
                     Set Active
                   </button>
@@ -317,46 +337,48 @@ export function ExaminationsView({
 
                 {canManage && (
                   <>
-                    <button
-                      type="button"
-                      onClick={() => onUpdateExam({ ...ex, locked: !ex.locked })}
-                      className={`inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-medium ${
-                        ex.locked
-                          ? 'border-amber-300 bg-amber-50 text-amber-900'
-                          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                      }`}
-                    >
-                      {ex.locked ? (
-                        <>
+                    {ex.locked || ex.published ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onUpdateExam({
+                            ...ex,
+                            locked: false,
+                            published: false,
+                          })
+                        }
+                        className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100 whitespace-nowrap"
+                      >
+                        <Unlock className="h-3.5 w-3.5" />
+                        <span>Reopen as In Progress</span>
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => onUpdateExam({ ...ex, locked: true })}
+                          className="inline-flex items-center gap-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                        >
                           <Lock className="h-3.5 w-3.5" />
-                          <span>Locked (Click to Unlock)</span>
-                        </>
-                      ) : (
-                        <>
-                          <Unlock className="h-3.5 w-3.5" />
-                          <span>Open (Click to Lock)</span>
-                        </>
-                      )}
-                    </button>
+                          <span>Lock Entry</span>
+                        </button>
 
-                    <button
-                      type="button"
-                      onClick={() =>
-                        onUpdateExam({
-                          ...ex,
-                          published: !ex.published,
-                          locked: !ex.published ? true : ex.locked,
-                        })
-                      }
-                      className={`inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium ${
-                        ex.published
-                          ? 'bg-emerald-700 text-white hover:bg-emerald-800'
-                          : 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
-                      }`}
-                    >
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      <span>{ex.published ? 'Published' : 'Publish Exam'}</span>
-                    </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onUpdateExam({
+                              ...ex,
+                              published: true,
+                              locked: true,
+                            })
+                          }
+                          className="inline-flex items-center gap-1 rounded-md border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-900 hover:bg-blue-100 whitespace-nowrap"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>Publish Final Results</span>
+                        </button>
+                      </>
+                    )}
 
                     {onArchiveOrDeleteExam && (
                       <>

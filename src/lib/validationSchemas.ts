@@ -59,6 +59,7 @@ export const studentProfileSchema = z.object({
   academicYear: z.string().trim().min(4).max(20),
   status: z.enum(['active', 'transferred', 'inactive']).default('active'),
   combinationId: z.string().trim().max(120).optional(),
+  offeredSubjectIds: z.array(z.string().trim().min(1)).optional(),
   parentName: z.string().trim().max(160).optional(),
   parentContact: z.string().trim().max(40).optional(),
   photoDataUrl: z.string().max(4_500_000).optional(),
@@ -73,10 +74,18 @@ export const createStudentsBodySchema = z
     message: 'Provide at least one student record.',
   });
 
-export const promoteStudentsSchema = z.object({
-  studentIds: z.array(z.string().trim().min(1)).min(1, 'Select at least one student.'),
-  targetClassId: z.string().trim().min(1, 'Target class is required.'),
-});
+export const promoteStudentsSchema = z
+  .object({
+    studentIds: z.array(z.string().trim().min(1)).min(1, 'Select at least one student.'),
+    targetClassId: z.string().trim().min(1).optional(),
+    targetAcademicYear: z.string().trim().min(4).max(20).optional(),
+    targetStatus: z.enum(['active', 'transferred', 'inactive']).optional(),
+    updateSchoolYear: z.boolean().optional(),
+    resetElectives: z.boolean().optional(),
+  })
+  .refine((d) => Boolean(d.targetClassId) || d.targetStatus !== undefined, {
+    message: 'Select a target class or completion status.',
+  });
 
 export const streamClassPayloadSchema = z.object({
   cls: z.object({
@@ -168,6 +177,19 @@ export const marksheetSchema = z.object({
       })
     )
     .default([]),
+});
+
+export const correctionRequestCreateSchema = z.object({
+  marksheetId: z.string().trim().max(160).optional(),
+  examId: z.string().trim().min(1, 'Exam ID is required.').max(120),
+  classId: z.string().trim().min(1, 'Class ID is required.').max(120),
+  subjectId: z.string().trim().min(1, 'Subject ID is required.').max(120),
+  assessmentScope: z.enum(['all', 'u1', 'u2', 'u3', 'eot']).default('all'),
+  reason: z.string().trim().min(3, 'Please provide a brief reason for the correction request.').max(500),
+});
+
+export const correctionRequestReviewSchema = z.object({
+  reviewNote: z.string().trim().max(500).optional(),
 });
 
 export const remarkSchema = z.object({

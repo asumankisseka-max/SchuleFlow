@@ -5,6 +5,7 @@ import {
   Download,
   FileSpreadsheet,
   FileText,
+  GraduationCap,
   History,
   Plus,
   Search,
@@ -20,6 +21,7 @@ import type {
   StudentProfile,
   StudentStatus,
   SubjectCombination,
+  SubjectDefinition,
   UserRole,
 } from '../types';
 import {
@@ -41,6 +43,7 @@ import { validateUgandanPhone } from '../utils/validation';
 interface StudentsViewProps {
   students: StudentProfile[];
   classes: StreamClass[];
+  subjects?: SubjectDefinition[];
   combinations: SubjectCombination[];
   schoolName: string;
   academicYear: string;
@@ -51,7 +54,16 @@ interface StudentsViewProps {
   onUpdateStudent: (student: StudentProfile) => void;
   onDeleteStudent?: (studentId: string) => void;
   onUploadStudentPhoto?: (studentId: string, dataUrl: string) => Promise<string>;
-  onBulkPromote: (studentIds: string[], targetClassId: string) => void;
+  onBulkPromote: (
+    studentIds: string[],
+    options: {
+      targetClassId?: string;
+      targetAcademicYear?: string;
+      targetStatus?: 'active' | 'transferred' | 'inactive';
+      updateSchoolYear?: boolean;
+      resetElectives?: boolean;
+    }
+  ) => void;
   onViewHistory: (studentId: string) => void;
   onViewReportCard: (classId: string, studentId: string) => void;
 }
@@ -59,6 +71,7 @@ interface StudentsViewProps {
 export function StudentsView({
   students,
   classes,
+  subjects = [],
   combinations,
   schoolName,
   academicYear,
@@ -102,6 +115,8 @@ export function StudentsView({
   const [parentName, setParentName] = useState('');
   const [parentContact, setParentContact] = useState('');
   const [status, setStatus] = useState<StudentStatus>('active');
+  const [customOfferingsEnabled, setCustomOfferingsEnabled] = useState(false);
+  const [offeredSubjectIds, setOfferedSubjectIds] = useState<string[]>([]);
   const [photoDataUrl, setPhotoDataUrl] = useState<string | undefined>(undefined);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -112,6 +127,21 @@ export function StudentsView({
   const [promoteTargetClassId, setPromoteTargetClassId] = useState(
     scopedClasses[1]?.id ?? scopedClasses[0]?.id ?? ''
   );
+
+  // End-of-Year Class Promotion modal state
+  const [promoModalOpen, setPromoModalOpen] = useState(false);
+  const [promoSourceClassId, setPromoSourceClassId] = useState(scopedClasses[0]?.id ?? '');
+  const [promoMode, setPromoMode] = useState<'promote' | 'graduate'>('promote');
+  const [promoTargetClassId, setPromoTargetClassId] = useState(
+    scopedClasses[1]?.id ?? scopedClasses[0]?.id ?? ''
+  );
+  const [promoAcademicYear, setPromoAcademicYear] = useState(() => {
+    const num = Number(academicYear);
+    return Number.isFinite(num) && num > 2000 ? String(num + 1) : academicYear;
+  });
+  const [promoUpdateSchoolYear, setPromoUpdateSchoolYear] = useState(false);
+  const [promoResetElectives, setPromoResetElectives] = useState(true);
+  const [promoStudentIds, setPromoStudentIds] = useState<string[]>([]);
 
   // Excel import modal state
   const [importRows, setImportRows] = useState<StudentDirectoryImportRow[] | null>(null);
@@ -141,6 +171,7 @@ export function StudentsView({
   );
 
   const classMap = useMemo(() => new Map(classes.map((c) => [c.id, c])), [classes]);
+  const subjectMap = useMemo(() => new Map(subjects.map((s) => [s.id, s])), [subjects]);
   const comboMap = useMemo(() => new Map(combinations.map((c) => [c.id, c])), [combinations]);
 
   const filteredStudents = useMemo(() => {
@@ -162,6 +193,62 @@ export function StudentsView({
       .sort((a, b) => (a.studentId || a.admissionNo).localeCompare(b.studentId || b.admissionNo));
   }, [students, classFilter, statusFilter, search]);
 
+  const suggestPromotionTarget = (sourceClsId: string) => {
+    const src = classMap.get(sourceClsId);
+    const activeInSource = students
+      .filter((s) => s.classId === sourceClsId && s.status === 'active')
+      .map((s) => s.id);
+    setPromoStudentIds(activeInSource);
+
+    if (!src) return;
+    const gradeOrder = ['S.1', 'S.2', 'S.3', 'S.4', 'S.5', 'S.6'];
+    const idx = gradeOrder.indexOf(src.gradeLevel);
+    if (src.gradeLevel === 'S.6' || (src.gradeLevel === 'S.4' && !showAlevel)) {
+      setPromoMode('graduate');
+      return;
+    }
+    setPromoMode('promote');
+    if (idx >= 0 && idx + 1 < gradeOrder.length) {
+      const nextGrade = gradeOrder[idx + 1];
+      const exactStreamMatch = scopedClasses.find(
+        (c) =>
+          c.id !== src.id &&
+          c.gradeLevel === nextGrade &&
+          (c.stream ?? '').toLowerCase() === (src.stream ?? '').toLowerCase()
+      );
+      const gradeMatch = scopedClasses.find(
+        (c) => c.id !== src.id && c.gradeLevel === nextGrade
+      );
+      const fallback = scopedClasses.find((c) => c.id !== src.id) ?? scopedClasses[0];
+      setPromoTargetClassId((exactStreamMatch ?? gradeMatch ?? fallback)?.id ?? '');
+    }
+  };
+
+  const openPromoModal = () => {
+    const defaultSrc =
+      (classFilter !== 'all' ? classFilter : undefined) ??
+      scopedClasses.find((c) =>
+        students.some((s) => s.classId === c.id && s.status === 'active')
+      )?.id ??
+      scopedClasses[0]?.id ??
+      '';
+    setPromoSourceClassId(defaultSrc);
+    const num = Number(academicYear);
+    setPromoAcademicYear(Number.isFinite(num) && num > 2000 ? String(num + 1) : academicYear);
+    setPromoUpdateSchoolYear(false);
+    setPromoResetElectives(true);
+    suggestPromotionTarget(defaultSrc);
+    setPromoModalOpen(true);
+  };
+
+  const promoSourceStudents = useMemo(
+    () =>
+      students
+        .filter((s) => s.classId === promoSourceClassId && s.status === 'active')
+        .sort((a, b) => (a.studentId || a.admissionNo).localeCompare(b.studentId || b.admissionNo)),
+    [students, promoSourceClassId]
+  );
+
   const openAddModal = () => {
     setEditingStudent(null);
     setAdmissionNo(nextStudentIdPreview);
@@ -174,6 +261,8 @@ export function StudentsView({
     setParentName('');
     setParentContact('');
     setStatus('active');
+    setCustomOfferingsEnabled(false);
+    setOfferedSubjectIds(classMap.get(defaultClass)?.subjectIds ?? []);
     setPhotoDataUrl(undefined);
     setFormError(null);
     setModalOpen(true);
@@ -190,6 +279,13 @@ export function StudentsView({
     setParentName(stu.parentName ?? '');
     setParentContact(stu.parentContact ?? '');
     setStatus(stu.status);
+    const hasCustom = Boolean(stu.offeredSubjectIds && stu.offeredSubjectIds.length > 0);
+    setCustomOfferingsEnabled(hasCustom);
+    setOfferedSubjectIds(
+      hasCustom
+        ? stu.offeredSubjectIds ?? []
+        : classMap.get(stu.classId)?.subjectIds ?? []
+    );
     setPhotoDataUrl(stu.photoDataUrl);
     setFormError(null);
     setModalOpen(true);
@@ -221,6 +317,11 @@ export function StudentsView({
       return;
     }
 
+    const resolvedOfferedSubjects =
+      customOfferingsEnabled && offeredSubjectIds.length > 0
+        ? offeredSubjectIds
+        : undefined;
+
     const payload: StudentProfile = {
       id: editingStudent?.id ?? `stu-${Date.now()}`,
       studentId: editingStudent?.studentId,
@@ -233,6 +334,7 @@ export function StudentsView({
       status,
       combinationId:
         selectedFormClass?.level === 'alevel' ? combinationId || combinations[0]?.id : undefined,
+      offeredSubjectIds: resolvedOfferedSubjects,
       parentName: parentName.trim() || undefined,
       parentContact: phoneCheck.normalized || undefined,
       photoDataUrl,
@@ -314,8 +416,16 @@ export function StudentsView({
             <>
               <button
                 type="button"
+                onClick={openPromoModal}
+                className="inline-flex items-center gap-1.5 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-900 hover:bg-blue-100 whitespace-nowrap shrink-0"
+              >
+                <GraduationCap className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>End-of-Year Promotion</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => downloadStudentImportTemplate(schoolName)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
               >
                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Excel Template</span>
@@ -334,7 +444,7 @@ export function StudentsView({
               <button
                 type="button"
                 onClick={() => excelInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
               >
                 <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-700" aria-hidden="true" />
                 <span>Import Excel</span>
@@ -342,7 +452,7 @@ export function StudentsView({
               <button
                 type="button"
                 onClick={openAddModal}
-                className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap shrink-0"
               >
                 <Plus className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>Register Student</span>
@@ -417,10 +527,13 @@ export function StudentsView({
             <button
               type="button"
               onClick={() => {
-                onBulkPromote(selectedIds, promoteTargetClassId);
+                onBulkPromote(selectedIds, {
+                  targetClassId: promoteTargetClassId,
+                  resetElectives: true,
+                });
                 setSelectedIds([]);
               }}
-              className="inline-flex items-center gap-1 rounded bg-blue-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-950"
+              className="inline-flex items-center gap-1 rounded bg-blue-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-950 whitespace-nowrap shrink-0"
             >
               <ArrowRightLeft className="h-3 w-3" />
               <span>Promote / Transfer</span>
@@ -771,7 +884,13 @@ export function StudentsView({
                   <label className="block font-medium text-slate-700 mb-1">Class &amp; Stream</label>
                   <select
                     value={classId}
-                    onChange={(e) => setClassId(e.target.value)}
+                    onChange={(e) => {
+                      const nextCid = e.target.value;
+                      setClassId(nextCid);
+                      if (!customOfferingsEnabled) {
+                        setOfferedSubjectIds(classMap.get(nextCid)?.subjectIds ?? []);
+                      }
+                    }}
                     className="w-full rounded border border-slate-300 px-2.5 py-1.5 text-slate-900"
                   >
                     {scopedClasses.map((c) => (
@@ -814,6 +933,63 @@ export function StudentsView({
                   </select>
                 </div>
               </div>
+
+              {selectedFormClass && selectedFormClass.subjectIds.length > 0 && subjects.length > 0 && (
+                <div className="pt-2 border-t border-slate-200 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="inline-flex items-center gap-2 font-medium text-slate-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={customOfferingsEnabled}
+                        onChange={(e) => {
+                          const enabled = e.target.checked;
+                          setCustomOfferingsEnabled(enabled);
+                          if (enabled && offeredSubjectIds.length === 0) {
+                            setOfferedSubjectIds(selectedFormClass.subjectIds);
+                          }
+                        }}
+                      />
+                      <span>Customize subjects offered by this student (electives)</span>
+                    </label>
+                    <span className="text-[11px] text-slate-400">
+                      {customOfferingsEnabled
+                        ? `${offeredSubjectIds.length} selected`
+                        : selectedFormClass.level === 'alevel'
+                          ? 'Uses A-Level combination'
+                          : 'All class subjects'}
+                    </span>
+                  </div>
+
+                  {customOfferingsEnabled && (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 rounded-md border border-slate-200 bg-slate-50 p-2.5">
+                      {selectedFormClass.subjectIds.map((sid) => {
+                        const sub = subjectMap.get(sid);
+                        if (!sub) return null;
+                        const checked = offeredSubjectIds.includes(sid);
+                        return (
+                          <label
+                            key={sid}
+                            className="inline-flex items-center gap-1.5 text-[11px] text-slate-800 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                setOfferedSubjectIds((prev) =>
+                                  prev.includes(sid)
+                                    ? prev.filter((id) => id !== sid)
+                                    : [...prev, sid]
+                                );
+                              }}
+                            />
+                            <span className="truncate">{sub.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-200">
                 <div>
@@ -982,6 +1158,239 @@ export function StudentsView({
                 className="rounded-md bg-blue-900 px-4 py-1.5 text-xs font-medium text-white hover:bg-blue-950 disabled:opacity-40"
               >
                 Import {importRows.filter((r) => !r.isDuplicate && !r.phoneInvalid && r.fullName).length} Students
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* End-of-Year Class Promotion Modal */}
+      {promoModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-2xl rounded-xl border border-slate-200 bg-white shadow-xl overflow-hidden max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200">
+              <div>
+                <h3 className="font-display text-base font-bold text-slate-900">
+                  End-of-Year Student Promotion
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Promote an entire class to the next grade or mark graduating finalists (S.4 / S.6) inactive while keeping historical reports intact.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPromoModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-700"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Source Class (Current)
+                  </label>
+                  <select
+                    value={promoSourceClassId}
+                    onChange={(e) => {
+                      const nextSrc = e.target.value;
+                      setPromoSourceClassId(nextSrc);
+                      suggestPromotionTarget(nextSrc);
+                    }}
+                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900"
+                  >
+                    {scopedClasses.map((c) => {
+                      const activeCount = students.filter(
+                        (s) => s.classId === c.id && s.status === 'active'
+                      ).length;
+                      return (
+                        <option key={c.id} value={c.id}>
+                          {c.name} ({activeCount} active)
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Promotion Action
+                  </label>
+                  <select
+                    value={promoMode}
+                    onChange={(e) =>
+                      setPromoMode(e.target.value as 'promote' | 'graduate')
+                    }
+                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900"
+                  >
+                    <option value="promote">Promote to Next Class</option>
+                    <option value="graduate">
+                      Graduate / Complete Year (Mark Inactive)
+                    </option>
+                  </select>
+                </div>
+
+                {promoMode === 'promote' && (
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Destination Class
+                    </label>
+                    <select
+                      value={promoTargetClassId}
+                      onChange={(e) => setPromoTargetClassId(e.target.value)}
+                      className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-slate-900"
+                    >
+                      {scopedClasses.map((c) => (
+                        <option key={c.id} value={c.id} disabled={c.id === promoSourceClassId}>
+                          {c.name} ({c.level === 'olevel' ? "O'Level" : "A'Level"})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Target Academic Year
+                  </label>
+                  <input
+                    type="text"
+                    value={promoAcademicYear}
+                    onChange={(e) => setPromoAcademicYear(e.target.value)}
+                    placeholder="e.g. 2027"
+                    className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-slate-900"
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+                {promoMode === 'promote' && (
+                  <label className="flex items-center gap-2 text-slate-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={promoResetElectives}
+                      onChange={(e) => setPromoResetElectives(e.target.checked)}
+                    />
+                    <span>
+                      Reset custom elective subject overrides so promoted students inherit the destination class subjects
+                    </span>
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={promoUpdateSchoolYear}
+                    onChange={(e) => setPromoUpdateSchoolYear(e.target.checked)}
+                  />
+                  <span>
+                    Also advance school workspace academic year to{' '}
+                    <strong className="font-mono">{promoAcademicYear || academicYear}</strong>
+                  </span>
+                </label>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-800">
+                    Students in Source Class ({promoStudentIds.length}/{promoSourceStudents.length} selected — uncheck repeaters)
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPromoStudentIds(promoSourceStudents.map((s) => s.id))}
+                      className="text-blue-800 hover:underline font-medium"
+                    >
+                      Select All
+                    </button>
+                    <span className="text-slate-300">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setPromoStudentIds([])}
+                      className="text-slate-600 hover:underline font-medium"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+
+                {promoSourceStudents.length === 0 ? (
+                  <div className="rounded-md border border-slate-200 p-4 text-center text-slate-500">
+                    No active students currently enrolled in this class.
+                  </div>
+                ) : (
+                  <div className="max-h-56 overflow-y-auto divide-y divide-slate-200 rounded-md border border-slate-200">
+                    {promoSourceStudents.map((stu) => {
+                      const checked = promoStudentIds.includes(stu.id);
+                      return (
+                        <label
+                          key={stu.id}
+                          className="flex items-center justify-between gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setPromoStudentIds((prev) =>
+                                  prev.includes(stu.id)
+                                    ? prev.filter((id) => id !== stu.id)
+                                    : [...prev, stu.id]
+                                )
+                              }
+                            />
+                            <span className="font-mono font-semibold text-slate-700">
+                              {stu.studentId || stu.admissionNo}
+                            </span>
+                            <span className="font-medium text-slate-900 truncate">
+                              {stu.fullName}
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-mono text-slate-500 shrink-0">
+                            Year {stu.academicYear}
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 px-5 py-3 border-t border-slate-200 bg-slate-50">
+              <button
+                type="button"
+                onClick={() => setPromoModalOpen(false)}
+                className="rounded-md border border-slate-300 bg-white px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 whitespace-nowrap shrink-0"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={
+                  promoStudentIds.length === 0 ||
+                  (promoMode === 'promote' &&
+                    (!promoTargetClassId || promoTargetClassId === promoSourceClassId))
+                }
+                onClick={() => {
+                  onBulkPromote(promoStudentIds, {
+                    targetClassId: promoMode === 'promote' ? promoTargetClassId : undefined,
+                    targetAcademicYear: promoAcademicYear.trim() || academicYear,
+                    targetStatus: promoMode === 'graduate' ? 'inactive' : 'active',
+                    updateSchoolYear: promoUpdateSchoolYear,
+                    resetElectives: promoMode === 'promote' ? promoResetElectives : false,
+                  });
+                  setPromoModalOpen(false);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md bg-blue-900 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-950 disabled:opacity-40 whitespace-nowrap shrink-0"
+              >
+                <GraduationCap className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {promoMode === 'graduate'
+                    ? `Graduate ${promoStudentIds.length} Student(s)`
+                    : `Promote ${promoStudentIds.length} Student(s)`}
+                </span>
               </button>
             </div>
           </div>

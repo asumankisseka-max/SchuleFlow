@@ -3,23 +3,32 @@ import {
   AlertTriangle,
   CheckCircle2,
   ClipboardCheck,
+  Clock,
   Eye,
   RotateCcw,
   ShieldCheck,
   Unlock,
   X,
+  XCircle,
 } from 'lucide-react';
 import type {
+  AssessmentComponent,
   ExaminationPeriod,
+  MarksheetCorrectionRequest,
   MarksheetRecord,
   MarksheetStatus,
   SchoolSettings,
   StreamClass,
   StudentProfile,
+  SubjectCombination,
   SubjectDefinition,
   UserAccount,
 } from '../types';
-import { validateMarksheetRecord } from '../utils/calculations';
+import {
+  filterStudentsOfferingSubject,
+  getMarksheetMissingBreakdown,
+  validateMarksheetRecord,
+} from '../utils/calculations';
 import { canApproveOrPublishResults } from '../utils/rbac';
 
 interface MarksheetsApprovalViewProps {
@@ -27,15 +36,27 @@ interface MarksheetsApprovalViewProps {
   activeExam: ExaminationPeriod;
   classes: StreamClass[];
   subjects: SubjectDefinition[];
+  combinations?: SubjectCombination[];
   students: StudentProfile[];
   users: UserAccount[];
   marksheets: MarksheetRecord[];
+  correctionRequests?: MarksheetCorrectionRequest[];
   settings: SchoolSettings;
   onApproveMarksheet: (examId: string, classId: string, subjectId: string) => void;
   onReturnMarksheet: (examId: string, classId: string, subjectId: string, comment: string) => void;
   onReopenMarksheet: (examId: string, classId: string, subjectId: string) => void;
   onPublishAllApproved: (examId: string) => void;
+  onApproveCorrectionRequest?: (requestId: string, reviewNote?: string) => Promise<void>;
+  onRejectCorrectionRequest?: (requestId: string, reviewNote?: string) => Promise<void>;
 }
+
+const SCOPE_LABELS: Record<AssessmentComponent, string> = {
+  all: 'Full Marksheet',
+  u1: 'U1 (Activity 1)',
+  u2: 'U2 (Activity 2)',
+  u3: 'U3 (Activity 3)',
+  eot: 'End of Term (EoT)',
+};
 
 type StatusFilter = 'all' | 'submitted' | 'returned' | 'approved' | 'published' | 'incomplete';
 
@@ -44,18 +65,23 @@ export function MarksheetsApprovalView({
   activeExam,
   classes,
   subjects,
+  combinations = [],
   students,
   users,
   marksheets,
+  correctionRequests = [],
   settings,
   onApproveMarksheet,
   onReturnMarksheet,
   onReopenMarksheet,
   onPublishAllApproved,
+  onApproveCorrectionRequest,
+  onRejectCorrectionRequest,
 }: MarksheetsApprovalViewProps) {
   const canApprove = canApproveOrPublishResults(currentUser.role);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [classFilter, setClassFilter] = useState<string>('all');
+  const [busyReqId, setBusyReqId] = useState<string | null>(null);
 
   const [inspectTarget, setInspectTarget] = useState<{
     cls: StreamClass;
@@ -66,7 +92,16 @@ export function MarksheetsApprovalView({
   const [commentError, setCommentError] = useState<string | null>(null);
 
   const subjectMap = useMemo(() => new Map(subjects.map((s) => [s.id, s])), [subjects]);
+  const classMap = useMemo(() => new Map(classes.map((c) => [c.id, c])), [classes]);
   const userMap = useMemo(() => new Map(users.map((u) => [u.id, u])), [users]);
+
+  const pendingCorrections = useMemo(
+    () =>
+      correctionRequests
+        .filter((r) => r.status === 'pending')
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    [correctionRequests]
+  );
 
   const rows = useMemo(() => {
     const participating = classes.filter((c) => activeExam.classIds.includes(c.id));
@@ -80,21 +115,33 @@ export function MarksheetsApprovalView({
       invalidCount: number;
       completedCount: number;
       totalStudents: number;
+      missingSummary: string;
     }> = [];
 
     for (const cls of participating) {
       if (classFilter !== 'all' && cls.id !== classFilter) continue;
-      const clsStudents = students.filter((s) => s.classId === cls.id && s.status === 'active');
 
       for (const subId of cls.subjectIds) {
         const sub = subjectMap.get(subId);
         if (!sub) continue;
+        const offeringStudents = filterStudentsOfferingSubject(
+          students,
+          subId,
+          cls,
+          combinations
+        );
         const sheet = marksheets.find(
           (m) => m.examId === activeExam.id && m.classId === cls.id && m.subjectId === subId
         );
         const teacherId = sheet?.teacherId ?? cls.subjectTeacherMap[subId] ?? '';
         const teacherName = userMap.get(teacherId)?.name ?? 'Unassigned';
-        const val = validateMarksheetRecord(sheet, clsStudents, cls.level, sub.maxMarks, settings);
+        const breakdown = getMarksheetMissingBreakdown(
+          sheet,
+          offeringStudents,
+          cls.level,
+          sub.maxMarks,
+          settings
+        );
 
         list.push({
           cls,
@@ -102,10 +149,11 @@ export function MarksheetsApprovalView({
           teacherName,
           sheet,
           status: sheet ? sheet.status : 'not_started',
-          missingCount: val.missingCount,
-          invalidCount: val.invalidCount,
-          completedCount: val.completedCount,
-          totalStudents: val.totalStudents,
+          missingCount: breakdown.missingStudentsCount,
+          invalidCount: breakdown.invalidCount,
+          completedCount: breakdown.completedStudents,
+          totalStudents: breakdown.totalStudents,
+          missingSummary: breakdown.summaryText,
         });
       }
     }
@@ -117,26 +165,41 @@ export function MarksheetsApprovalView({
       }
       return row.status === statusFilter;
     });
-  }, [classes, activeExam.classIds, activeExam.id, classFilter, students, subjectMap, marksheets, userMap, settings, statusFilter]);
+  }, [
+    classes,
+    activeExam.classIds,
+    activeExam.id,
+    classFilter,
+    students,
+    combinations,
+    subjectMap,
+    marksheets,
+    userMap,
+    settings,
+    statusFilter,
+  ]);
 
   const approvedCount = rows.filter((r) => r.status === 'approved').length;
 
   const inspectValidation = useMemo(() => {
     if (!inspectTarget) return null;
-    const clsStudents = students.filter(
-      (s) => s.classId === inspectTarget.cls.id && s.status === 'active'
+    const offeringStudents = filterStudentsOfferingSubject(
+      students,
+      inspectTarget.sub.id,
+      inspectTarget.cls,
+      combinations
     );
     return {
-      students: clsStudents,
+      students: offeringStudents,
       validation: validateMarksheetRecord(
         inspectTarget.sheet,
-        clsStudents,
+        offeringStudents,
         inspectTarget.cls.level,
         inspectTarget.sub.maxMarks,
         settings
       ),
     };
-  }, [inspectTarget, students, settings]);
+  }, [inspectTarget, students, combinations, settings]);
 
   return (
     <div className="space-y-5">
@@ -161,6 +224,85 @@ export function MarksheetsApprovalView({
           </button>
         )}
       </div>
+
+      {/* Pending Teacher Correction Requests */}
+      {canApprove && pendingCorrections.length > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50/70 p-4 space-y-3">
+          <div className="flex items-center gap-2 text-amber-950">
+            <Clock className="h-4 w-4 text-amber-700 shrink-0" />
+            <h3 className="font-display text-sm font-bold">
+              Teacher Requests to Re-correct Submitted Results ({pendingCorrections.length})
+            </h3>
+          </div>
+          <div className="divide-y divide-amber-200 border border-amber-200 rounded-md bg-white overflow-hidden">
+            {pendingCorrections.map((req) => {
+              const clsName = classMap.get(req.classId)?.name ?? req.classId;
+              const subName = subjectMap.get(req.subjectId)?.name ?? req.subjectId;
+              const isBusy = busyReqId === req.id;
+              return (
+                <div
+                  key={req.id}
+                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-xs"
+                >
+                  <div className="space-y-0.5 min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-slate-900">
+                        {req.requestedByName}
+                        {req.requestedByStaffId ? ` (${req.requestedByStaffId})` : ''}
+                      </span>
+                      <span className="text-slate-300">·</span>
+                      <span className="font-semibold text-blue-900">
+                        {clsName} · {subName}
+                      </span>
+                      <span className="text-slate-300">·</span>
+                      <span className="text-slate-600">{SCOPE_LABELS[req.assessmentScope]}</span>
+                    </div>
+                    <p className="text-slate-700">Reason: &ldquo;{req.reason}&rdquo;</p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onRejectCorrectionRequest && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setBusyReqId(req.id);
+                          try {
+                            await onRejectCorrectionRequest(req.id);
+                          } finally {
+                            setBusyReqId(null);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                      >
+                        <XCircle className="h-3 w-3 text-red-600" />
+                        <span>Decline</span>
+                      </button>
+                    )}
+                    {onApproveCorrectionRequest && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={async () => {
+                          setBusyReqId(req.id);
+                          try {
+                            await onApproveCorrectionRequest(req.id);
+                          } finally {
+                            setBusyReqId(null);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded bg-emerald-700 px-3 py-1 text-[11px] font-semibold text-white hover:bg-emerald-800"
+                      >
+                        <Unlock className="h-3 w-3" />
+                        <span>{isBusy ? 'Approving...' : 'Approve & Unlock'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="rounded-lg border border-slate-200 bg-white p-4 flex flex-wrap items-center justify-between gap-3">
@@ -243,8 +385,11 @@ export function MarksheetsApprovalView({
                         {row.invalidCount} invalid
                       </span>
                     ) : row.missingCount > 0 ? (
-                      <span className="text-amber-700 font-medium">
-                        {row.missingCount} missing
+                      <span
+                        className="text-amber-700 font-medium"
+                        title={row.missingSummary || undefined}
+                      >
+                        {row.missingSummary || `${row.missingCount} missing`}
                       </span>
                     ) : (
                       <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">

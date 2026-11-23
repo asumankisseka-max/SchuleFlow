@@ -4,6 +4,7 @@ import express from 'express';
 import http from 'node:http';
 import {
   hashPassword,
+  setRuntimeSessionSecret,
   signSessionToken,
   validatePasswordStrength,
   verifyPassword,
@@ -22,6 +23,7 @@ import {
   generateNextSchoolCode,
   generateNextStaffId,
   generateNextStudentId,
+  normalizeShortStaffIdCandidate,
 } from '../src/utils/idGenerator.ts';
 
 process.env.TEST_MODE = 'true';
@@ -80,15 +82,58 @@ describe('Password Hashing, Session Tokens & ID Generation', () => {
     assert.equal(verifySessionToken(expired), null);
   });
 
-  it('generates globally unique school codes and school-scoped Staff & Student IDs', () => {
+  it('signs and verifies tokens in production even when SESSION_SECRET env var is omitted', () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevTestMode = process.env.TEST_MODE;
+    const prevSessionSecret = process.env.SESSION_SECRET;
+
+    process.env.NODE_ENV = 'production';
+    delete process.env.TEST_MODE;
+    delete process.env.SESSION_SECRET;
+
+    try {
+      setRuntimeSessionSecret('c9e17a4d8f2049b3926b8c4a17d5f0e3a8124b9c0d6e7f12');
+      const token = signSessionToken({
+        userId: 1,
+        uid: 'env:super_admin:superadmin@schuleflow.ac.ug',
+        email: 'superadmin@schuleflow.ac.ug',
+        name: 'Platform Super Admin',
+        globalRole: 'super_admin',
+        schoolId: null,
+        role: 'school_admin',
+        schoolRole: 'school_admin',
+      });
+      const verified = verifySessionToken(token);
+      assert.ok(verified);
+      assert.equal(verified.globalRole, 'super_admin');
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevTestMode === undefined) delete process.env.TEST_MODE;
+      else process.env.TEST_MODE = prevTestMode;
+      if (prevSessionSecret === undefined) delete process.env.SESSION_SECRET;
+      else process.env.SESSION_SECRET = prevSessionSecret;
+    }
+  });
+
+  it('generates globally unique school codes, short (<4 char) Staff IDs, and Student IDs', () => {
     assert.equal(extractSchoolInitials('Kampala Horizon High School'), 'KHHS');
     assert.equal(extractSchoolInitials('Kampala High School'), 'KHS');
 
     const code = generateNextSchoolCode('Kampala High School', ['KHS-101', 'SMCM-102']);
     assert.equal(code, 'KHS-103');
 
-    const staffId = generateNextStaffId('Kampala High School', ['KHS-TCH-001', 'KHS-TCH-002']);
-    assert.equal(staffId, 'KHS-TCH-003');
+    const staffId = generateNextStaffId('Kampala High School', ['001', '002']);
+    assert.equal(staffId, '003');
+    assert.ok(staffId.length < 4);
+
+    // Also increments cleanly past any remaining legacy prefixes
+    assert.equal(generateNextStaffId('Kampala High School', ['KHS-TCH-001', '002']), '003');
+
+    assert.equal(normalizeShortStaffIdCandidate('1'), '001');
+    assert.equal(normalizeShortStaffIdCandidate('07'), '007');
+    assert.equal(normalizeShortStaffIdCandidate('007'), '007');
+    assert.equal(normalizeShortStaffIdCandidate('1000'), null);
 
     const studentId = generateNextStudentId('KHS', ['KHS-STD-001'], true);
     assert.equal(studentId, 'KHS-STD-002');

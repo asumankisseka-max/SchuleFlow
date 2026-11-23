@@ -17,7 +17,17 @@ export interface LocalSessionPayload {
   exp: number;
 }
 
-let warnedMissingSecret = false;
+let runtimeDbSecret: string | null = null;
+let ephemeralFallbackSecret: string | null = null;
+let cachedDbDerivedSecret: { url: string; secret: string } | null = null;
+let warnedFallbackSecret = false;
+
+export function setRuntimeSessionSecret(secret: string): void {
+  const trimmed = secret.trim();
+  if (trimmed.length >= 16) {
+    runtimeDbSecret = trimmed;
+  }
+}
 
 function getSessionSecret(): string {
   const configured = process.env.SESSION_SECRET?.trim();
@@ -25,21 +35,32 @@ function getSessionSecret(): string {
     return configured;
   }
 
-  const isProd = process.env.NODE_ENV === 'production' && !process.env.TEST_MODE;
-  if (isProd) {
-    throw new Error(
-      'Security misconfiguration: SESSION_SECRET (at least 16 characters) must be set in production.'
-    );
+  if (runtimeDbSecret && runtimeDbSecret.length >= 16) {
+    return runtimeDbSecret;
   }
 
-  if (!warnedMissingSecret) {
-    warnedMissingSecret = true;
+  const dbUrl = process.env.DATABASE_URL?.trim();
+  if (dbUrl) {
+    if (!cachedDbDerivedSecret || cachedDbDerivedSecret.url !== dbUrl) {
+      cachedDbDerivedSecret = {
+        url: dbUrl,
+        secret: createHmac('sha256', 'schuleflow-session-fallback-v1').update(dbUrl).digest('hex'),
+      };
+    }
+    return cachedDbDerivedSecret.secret;
+  }
+
+  if (!warnedFallbackSecret) {
+    warnedFallbackSecret = true;
     console.warn(
-      'Warning: SESSION_SECRET is not configured. Using development fallback secret; set SESSION_SECRET before production deployment.'
+      'Warning: SESSION_SECRET is not set and database runtime secret has not been loaded yet; using process-local CSPRNG session secret.'
     );
   }
 
-  return process.env.DATABASE_URL || 'schuleflow-dev-only-session-secret';
+  if (!ephemeralFallbackSecret) {
+    ephemeralFallbackSecret = randomBytes(48).toString('hex');
+  }
+  return ephemeralFallbackSecret;
 }
 
 export function validatePasswordStrength(password: string): string | null {

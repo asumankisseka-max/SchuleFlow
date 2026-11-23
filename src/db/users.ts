@@ -8,6 +8,7 @@ import {
   type RecoveryLookupMethod,
 } from '../lib/passwordAuth.ts';
 import type { AuthSessionProfile, PublicSchoolBranding, UserRole } from '../types.ts';
+import { normalizeShortStaffIdCandidate } from '../utils/idGenerator.ts';
 import { normalizeUserRole, ROLE_DISPLAY_NAMES } from '../utils/rbac.ts';
 import { DEFAULT_UNIFORM_PRIMARY, DEFAULT_UNIFORM_SECONDARY } from '../utils/schoolTheme.ts';
 import { buildPhoneLoginCandidates, normalizeStoredPhone } from '../utils/validation.ts';
@@ -216,7 +217,10 @@ async function finalizeSchoolUserLogin(
       target: users.uid,
       set: {
         staffId: staff.staffId,
+        email: staffEmail,
+        username: staff.username.toLowerCase(),
         phone: normalizedPhone,
+        ...(staff.passwordHash ? { passwordHash: staff.passwordHash } : {}),
         globalRole: 'school_user',
         schoolId: school.id,
         schoolRole: effectiveRole,
@@ -259,7 +263,9 @@ export async function authenticateWithCredentials(params: {
         )
       : undefined;
 
-  // 1. Optional explicit School Code scoping (used when caller supplies schoolCode or disambiguates)
+  const shortStaffCandidate = normalizeShortStaffIdCandidate(params.identifier);
+
+  // 1. School Code scoping (required for school login flow with short Staff IDs, e.g. 001 / 1)
   if (cleanSchoolCode) {
     const schoolRows = await db
       .select()
@@ -282,6 +288,9 @@ export async function authenticateWithCredentials(params: {
           sql`${users.globalRole} <> 'super_admin'`,
           or(
             sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${cleanIdentifier}`,
+            ...(shortStaffCandidate
+              ? [sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${shortStaffCandidate.toLowerCase()}`]
+              : []),
             sql`lower(trim(${users.email})) = ${cleanIdentifier}`,
             sql`lower(trim(COALESCE(${users.username}, ''))) = ${cleanIdentifier}`,
             ...(userPhonePredicate ? [userPhonePredicate] : [])
@@ -298,6 +307,11 @@ export async function authenticateWithCredentials(params: {
           eq(staffTeachers.schoolId, school.id),
           or(
             sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${cleanIdentifier}`,
+            ...(shortStaffCandidate
+              ? [
+                  sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${shortStaffCandidate.toLowerCase()}`,
+                ]
+              : []),
             sql`lower(trim(${staffTeachers.email})) = ${cleanIdentifier}`,
             sql`lower(trim(${staffTeachers.username})) = ${cleanIdentifier}`,
             ...(staffPhonePredicate ? [staffPhonePredicate] : [])
@@ -340,6 +354,16 @@ export async function authenticateWithCredentials(params: {
       );
     }
     return null;
+  }
+
+  // Never allow bare short numeric Staff IDs (< 4 chars, e.g. 001 / 1) without School ID
+  if (shortStaffCandidate) {
+    verifyPassword(password, DUMMY_TIMING_HASH);
+    throw new AuthValidationError(
+      'Enter your School ID first when signing in with your short Staff ID.',
+      409,
+      'SCHOOL_CODE_REQUIRED'
+    );
   }
 
   // 2. Credential-driven automatic separation (Platform Super Admin vs School Tenants)
@@ -444,8 +468,7 @@ export async function authenticateWithCredentials(params: {
     }
   }
 
-  const totalTargets = (verifiedSuperAdmins.length > 0 ? 1 : 0) + verifiedSchoolTargets.size;
-  if (totalTargets === 0) {
+  if (verifiedSuperAdmins.length === 0 && verifiedSchoolTargets.size === 0) {
     if (deactivatedType === 'super_admin') {
       throw new AuthValidationError(
         'Account deactivated. Please contact Platform Support.',
@@ -461,14 +484,7 @@ export async function authenticateWithCredentials(params: {
     return null;
   }
 
-  if (totalTargets > 1) {
-    throw new AuthValidationError(
-      'Your credentials match multiple workspaces. Enter your School Code to continue.',
-      409,
-      'SCHOOL_CODE_REQUIRED'
-    );
-  }
-
+  // Platform Super Admin has no School ID — always sign in directly when a super_admin credential verifies
   if (verifiedSuperAdmins.length > 0) {
     const adminRow = verifiedSuperAdmins[0];
     const updated = await db
@@ -481,6 +497,14 @@ export async function authenticateWithCredentials(params: {
       .where(eq(users.id, adminRow.id))
       .returning();
     return toProfile(updated[0], null);
+  }
+
+  if (verifiedSchoolTargets.size > 1) {
+    throw new AuthValidationError(
+      'Your credentials match multiple workspaces. Enter your School Code to continue.',
+      409,
+      'SCHOOL_CODE_REQUIRED'
+    );
   }
 
   const [target] = Array.from(verifiedSchoolTargets.values());
@@ -597,6 +621,7 @@ export async function lookupRecoverableAccount(params: {
 
   if (identifier) {
     const clean = identifier.toLowerCase();
+    const shortStaffCandidate = normalizeShortStaffIdCandidate(identifier);
     const phoneCandidates = buildPhoneLoginCandidates(identifier);
     const userPhonePred =
       phoneCandidates.length > 0
@@ -608,6 +633,9 @@ export async function lookupRecoverableAccount(params: {
 
     const idPred = or(
       sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${clean}`,
+      ...(scopedSchoolId && shortStaffCandidate
+        ? [sql`lower(trim(COALESCE(${users.staffId}, ''))) = ${shortStaffCandidate.toLowerCase()}`]
+        : []),
       sql`lower(${users.email}) = ${clean}`,
       sql`lower(COALESCE(${users.username}, '')) = ${clean}`,
       ...(userPhonePred ? [userPhonePred] : [])
@@ -631,6 +659,11 @@ export async function lookupRecoverableAccount(params: {
           : undefined;
       const staffPred = or(
         sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${clean}`,
+        ...(scopedSchoolId && shortStaffCandidate
+          ? [
+              sql`lower(trim(COALESCE(${staffTeachers.staffId}, ''))) = ${shortStaffCandidate.toLowerCase()}`,
+            ]
+          : []),
         sql`lower(${staffTeachers.email}) = ${clean}`,
         sql`lower(${staffTeachers.username}) = ${clean}`,
         ...(staffPhonePred ? [staffPhonePred] : [])
@@ -794,10 +827,16 @@ export async function verifyRecoveryIdentity(
   const answerLower = answer.toLowerCase();
   const answerPhoneCandidates = buildPhoneLoginCandidates(answer);
 
+  const shortStaffAnswer = normalizeShortStaffIdCandidate(answer);
+
   // Hardened identity verification: disallow public-name-only or 4-digit suffix bypasses.
   // Require matching full registered phone number, Staff ID, or full email address.
   const matchesEmail = email === answerLower;
-  const matchesStaffId = Boolean(staffCode && staffCode.toLowerCase() === answerLower);
+  const matchesStaffId = Boolean(
+    staffCode &&
+      (staffCode.toLowerCase() === answerLower ||
+        (shortStaffAnswer && staffCode.toLowerCase() === shortStaffAnswer.toLowerCase()))
+  );
   const matchesPhone = Boolean(phone && answerPhoneCandidates.includes(phone));
   const matchesUsername = payload.lookupMethod === 'name_school' && username === answerLower;
 

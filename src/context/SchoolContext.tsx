@@ -21,7 +21,8 @@ import { isSchoolSubscriptionExpired } from '../utils/plans';
 import { ROLE_DISPLAY_NAMES } from '../utils/rbac';
 
 const SESSION_STORAGE_KEY = 'schuleflow_auth_token';
-const RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts';
+const LEGACY_RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts';
+const RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts_v2';
 
 export interface RememberedAccountHint {
   identifier: string;
@@ -69,6 +70,7 @@ function clearStoredToken(): void {
 function readRecentAccounts(): RememberedAccountHint[] {
   if (typeof window === 'undefined') return [];
   try {
+    window.localStorage.removeItem(LEGACY_RECENT_ACCOUNTS_KEY);
     const raw = window.localStorage.getItem(RECENT_ACCOUNTS_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
@@ -168,7 +170,7 @@ interface SchoolContextValue {
   signOutWorkspace: () => Promise<void>;
   completePasswordChange: (token: string, updatedUser: AuthSessionProfile) => void;
   refreshPlatformData: () => Promise<void>;
-  refreshTenantWorkspace: (schoolId?: string) => Promise<void>;
+  refreshTenantWorkspace: (schoolId?: string, silent?: boolean) => Promise<void>;
   refreshSubscriptionPortal: (schoolId?: string) => Promise<void>;
   updateLocalTenantDb: (updater: (prev: SchoolDatabase) => SchoolDatabase) => void;
   updateLocalActiveSchool: (updater: (prev: SchoolTenant) => SchoolTenant) => void;
@@ -228,10 +230,13 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
       schoolId: string,
       forceRefresh = false,
       profileOverride?: AuthSessionProfile | null,
-      schoolsOverride?: SchoolTenant[]
+      schoolsOverride?: SchoolTenant[],
+      silent = false
     ) => {
-      setLoadingWorkspace(true);
-      setWorkspaceError(null);
+      if (!silent) {
+        setLoadingWorkspace(true);
+        setWorkspaceError(null);
+      }
       configureApiClient(getValidToken, schoolId);
 
       const verifyTenantStaffMembership = (resolvedDb: SchoolDatabase): boolean => {
@@ -318,15 +323,21 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
             await enterExpiredPortalMode();
             return;
           } catch (portalErr: unknown) {
-            setWorkspaceError(formatFriendlyAuthError(portalErr));
-            setDb(null);
+            if (!silent) {
+              setWorkspaceError(formatFriendlyAuthError(portalErr));
+              setDb(null);
+            }
             return;
           }
         }
-        setWorkspaceError(formatFriendlyAuthError(err));
-        setDb(null);
+        if (!silent) {
+          setWorkspaceError(formatFriendlyAuthError(err));
+          setDb(null);
+        }
       } finally {
-        setLoadingWorkspace(false);
+        if (!silent) {
+          setLoadingWorkspace(false);
+        }
       }
     },
     [getValidToken]
@@ -467,7 +478,9 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         clearStoredToken();
         if (active) {
           setAuthProfile(null);
-          setAuthError(formatFriendlyAuthError(err));
+          if (!(err instanceof ApiError && err.status === 401)) {
+            setAuthError(formatFriendlyAuthError(err));
+          }
         }
       } finally {
         if (active) setAuthLoading(false);
@@ -576,10 +589,10 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   }, [authProfile, loadPlatformData]);
 
   const refreshTenantWorkspace = useCallback(
-    async (targetSchoolId?: string) => {
+    async (targetSchoolId?: string, silent = false) => {
       const sid = targetSchoolId ?? activeSchoolId;
       if (!sid) return;
-      await loadTenantWorkspace(sid, true, authProfileRef.current, []);
+      await loadTenantWorkspace(sid, true, authProfileRef.current, [], silent);
     },
     [activeSchoolId, loadTenantWorkspace]
   );

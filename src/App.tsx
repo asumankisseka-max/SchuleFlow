@@ -21,6 +21,7 @@ import { UserManagementView } from './components/UserManagementView';
 import { useSchoolContext } from './context/SchoolContext';
 import { ApiError } from './utils/apiClient';
 import type {
+  AssessmentComponent,
   CurriculumScope,
   ExaminationPeriod,
   MarkEntryItem,
@@ -114,6 +115,7 @@ export default function App() {
   const [activeExamId, setActiveExamId] = useState<string>('');
   const [activeClassId, setActiveClassId] = useState<string>('');
   const [activeSubjectId, setActiveSubjectId] = useState<string>('');
+  const [activeAssessment, setActiveAssessment] = useState<AssessmentComponent>('all');
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('dashboard');
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -127,6 +129,29 @@ export default function App() {
       setInitialBootDone(true);
     }
   }, [authLoading]);
+
+  // Live background sync on window focus & every 12s so DOS approvals & teacher submissions reflect immediately
+  useEffect(() => {
+    if (
+      !authProfile ||
+      authProfile.globalRole === 'super_admin' ||
+      !activeSchoolId ||
+      subscriptionLocked
+    ) {
+      return;
+    }
+    const handleFocus = () => {
+      void refreshTenantWorkspace(undefined, true);
+    };
+    window.addEventListener('focus', handleFocus);
+    const interval = window.setInterval(() => {
+      void refreshTenantWorkspace(undefined, true);
+    }, 12_000);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      window.clearInterval(interval);
+    };
+  }, [authProfile, activeSchoolId, subscriptionLocked, refreshTenantWorkspace]);
 
   const currentUser: UserAccount | null = useMemo(() => {
     if (!authProfile) return null;
@@ -210,9 +235,12 @@ export default function App() {
     if (db) {
       const nonArchivedExams = db.exams.filter((e) => !e.archived);
       const examPool = nonArchivedExams.length > 0 ? nonArchivedExams : db.exams;
+      const inProgressPool = examPool.filter((e) => !e.archived && !e.locked && !e.published);
+      const preferredExam =
+        inProgressPool[inProgressPool.length - 1] ?? examPool[examPool.length - 1];
       const nonArchivedClasses = db.classes.filter((c) => !c.archived);
       const classPool = nonArchivedClasses.length > 0 ? nonArchivedClasses : db.classes;
-      setActiveExamId(examPool[examPool.length - 1]?.id ?? '');
+      setActiveExamId(preferredExam?.id ?? '');
       setActiveClassId(classPool[0]?.id ?? '');
     } else {
       setActiveExamId('');
@@ -276,6 +304,13 @@ export default function App() {
     return db.marksheets.filter((m) => m.examId === activeExam.id && m.status === 'submitted').length;
   }, [db, activeExam]);
 
+  const pendingCorrectionRequestsCount = useMemo(() => {
+    if (!db || !activeExam) return 0;
+    return (db.correctionRequests ?? []).filter(
+      (r) => r.examId === activeExam.id && r.status === 'pending'
+    ).length;
+  }, [db, activeExam]);
+
   const returnedForTeacherCount = useMemo(() => {
     if (!db || !activeExam || !currentUser) return 0;
     return db.marksheets.filter(
@@ -283,6 +318,17 @@ export default function App() {
         m.examId === activeExam.id &&
         m.status === 'returned' &&
         (!isTeachingRole(currentUser.role) || m.teacherId === currentUser.id)
+    ).length;
+  }, [db, activeExam, currentUser]);
+
+  const teacherUnlockedCorrectionsCount = useMemo(() => {
+    if (!db || !activeExam || !currentUser || !isTeachingRole(currentUser.role)) return 0;
+    return (db.correctionRequests ?? []).filter(
+      (r) =>
+        r.examId === activeExam.id &&
+        r.status === 'approved' &&
+        (r.requestedByUserId === currentUser.id ||
+          (currentUser.staffId && r.requestedByStaffId === currentUser.staffId))
     ).length;
   }, [db, activeExam, currentUser]);
 
@@ -553,7 +599,18 @@ export default function App() {
           idx >= 0
             ? prev.marksheets.map((m, i) => (i === idx ? saved : m))
             : [...prev.marksheets, saved];
-        return { ...prev, marksheets: nextSheets };
+        const nextRequests =
+          saved.status === 'submitted' && prev.correctionRequests
+            ? prev.correctionRequests.map((req) =>
+                req.examId === saved.examId &&
+                req.classId === saved.classId &&
+                req.subjectId === saved.subjectId &&
+                req.status === 'approved'
+                  ? { ...req, status: 'completed' as const }
+                  : req
+              )
+            : prev.correctionRequests;
+        return { ...prev, marksheets: nextSheets, correctionRequests: nextRequests };
       });
       setNotice(successMsg);
     } catch (err: unknown) {
@@ -561,7 +618,7 @@ export default function App() {
         setErrorBanner(
           `${err.message} Refreshing latest marksheet version from server...`
         );
-        void refreshTenantWorkspace();
+        void refreshTenantWorkspace(undefined, true);
         return;
       }
       setErrorBanner(err instanceof Error ? err.message : 'Failed to persist marksheet.');
@@ -588,9 +645,13 @@ export default function App() {
     examId: string,
     classId: string,
     subjectId: string,
-    entries: Record<string, MarkEntryItem>
+    entries: Record<string, MarkEntryItem>,
+    missingSummary?: string
   ) => {
     const now = new Date().toISOString();
+    const auditDetail = missingSummary
+      ? `Submitted directly to system with missing marks flagged (${missingSummary}).`
+      : 'All required student marks verified and submitted into the system.';
     const updated = buildUpdatedMarksheet(examId, classId, subjectId, (ms) => ({
       ...ms,
       entries,
@@ -599,12 +660,101 @@ export default function App() {
       submittedBy: currentUser.id,
       dosComment: undefined,
       lastModified: now,
-      auditHistory: [
-        ...ms.auditHistory,
-        makeAudit('Submitted to DOS', 'All required student marks verified and submitted for DOS review.'),
-      ],
+      auditHistory: [...ms.auditHistory, makeAudit('Submitted Results', auditDetail)],
     }));
-    void applyMarksheetMutation(updated, 'Marksheet submitted to Director of Studies for verification.');
+    const msg = missingSummary
+      ? `Results loaded into the system. Missing marks alert sent to your dashboard & DOS (${missingSummary}).`
+      : 'Results submitted and loaded into the system.';
+    void applyMarksheetMutation(updated, msg);
+  };
+
+  const handleRequestCorrection = async (
+    examId: string,
+    classId: string,
+    subjectId: string,
+    assessmentScope: AssessmentComponent,
+    reason: string
+  ) => {
+    setErrorBanner(null);
+    const existing = db.marksheets.find(
+      (m) => m.examId === examId && m.classId === classId && m.subjectId === subjectId
+    );
+    try {
+      const res = await tenantApi.requestMarksheetCorrection({
+        marksheetId: existing?.id,
+        examId,
+        classId,
+        subjectId,
+        assessmentScope,
+        reason,
+      });
+      updateLocalTenantDb((prev) => ({
+        ...prev,
+        correctionRequests: [res.request, ...(prev.correctionRequests ?? [])],
+        marksheets: res.marksheet
+          ? prev.marksheets.map((m) =>
+              m.examId === res.marksheet!.examId &&
+              m.classId === res.marksheet!.classId &&
+              m.subjectId === res.marksheet!.subjectId
+                ? res.marksheet!
+                : m
+            )
+          : prev.marksheets,
+      }));
+      setNotice('Correction approval request sent to the Director of Studies.');
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Failed to submit correction request.';
+      setErrorBanner(msg);
+      throw err;
+    }
+  };
+
+  const handleApproveCorrectionRequest = async (requestId: string, reviewNote?: string) => {
+    setErrorBanner(null);
+    try {
+      const res = await tenantApi.approveCorrectionRequest(requestId, reviewNote);
+      updateLocalTenantDb((prev) => ({
+        ...prev,
+        correctionRequests: (prev.correctionRequests ?? []).map((r) =>
+          r.id === res.request.id ? res.request : r
+        ),
+        marksheets: res.marksheet
+          ? prev.marksheets.map((m) =>
+              m.examId === res.marksheet!.examId &&
+              m.classId === res.marksheet!.classId &&
+              m.subjectId === res.marksheet!.subjectId
+                ? res.marksheet!
+                : m
+            )
+          : prev.marksheets,
+      }));
+      setNotice(
+        `Correction approved for ${res.request.requestedByName}. Teacher can now re-edit and resubmit.`
+      );
+    } catch (err: unknown) {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Failed to approve correction request.'
+      );
+    }
+  };
+
+  const handleRejectCorrectionRequest = async (requestId: string, reviewNote?: string) => {
+    setErrorBanner(null);
+    try {
+      const res = await tenantApi.rejectCorrectionRequest(requestId, reviewNote);
+      updateLocalTenantDb((prev) => ({
+        ...prev,
+        correctionRequests: (prev.correctionRequests ?? []).map((r) =>
+          r.id === res.request.id ? res.request : r
+        ),
+      }));
+      setNotice(`Declined correction request from ${res.request.requestedByName}.`);
+    } catch (err: unknown) {
+      setErrorBanner(
+        err instanceof Error ? err.message : 'Failed to decline correction request.'
+      );
+    }
   };
 
   const handleApproveMarksheet = (examId: string, classId: string, subjectId: string) => {
@@ -696,8 +846,8 @@ export default function App() {
         onSelectTab={safeNavigate}
         settings={db.settings}
         schoolCode={activeSchool?.schoolCode ?? authProfile.schoolCode ?? undefined}
-        pendingApprovalCount={pendingApprovalCount}
-        returnedCount={returnedForTeacherCount}
+        pendingApprovalCount={pendingApprovalCount + pendingCorrectionRequestsCount}
+        returnedCount={returnedForTeacherCount + teacherUnlockedCorrectionsCount}
         mobileOpen={mobileSidebarOpen}
         onCloseMobile={() => setMobileSidebarOpen(false)}
         onChangePassword={() => setChangePwdOpen(true)}
@@ -773,11 +923,18 @@ export default function App() {
                     onChange={(e) => setActiveExamId(e.target.value)}
                     className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-900 focus:border-blue-800 focus:outline-none"
                   >
-                    {activeExams.map((ex) => (
-                      <option key={ex.id} value={ex.id}>
-                        {ex.name} · {ex.academicYear}
-                      </option>
-                    ))}
+                    {activeExams.map((ex) => {
+                      const statusLabel = ex.published
+                        ? 'Final Published'
+                        : ex.locked
+                          ? 'Locked'
+                          : 'In Progress';
+                      return (
+                        <option key={ex.id} value={ex.id}>
+                          {ex.name} · {ex.academicYear} ({statusLabel})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
@@ -853,11 +1010,15 @@ export default function App() {
               activeExam={activeExam}
               curriculumScope={effectiveCurriculumScope}
               onNavigate={safeNavigate}
-              onSelectClassAndNavigate={(cid, tab, sid) => {
+              onSelectClassAndNavigate={(cid, tab, sid, assessment, examId) => {
+                if (examId) setActiveExamId(examId);
                 setActiveClassId(cid);
                 setActiveSubjectId(sid ?? '');
+                setActiveAssessment(assessment ?? 'all');
                 safeNavigate(tab);
               }}
+              onApproveCorrectionRequest={handleApproveCorrectionRequest}
+              onRejectCorrectionRequest={handleRejectCorrectionRequest}
             />
           )}
 
@@ -865,6 +1026,7 @@ export default function App() {
             <StudentsView
               students={db.students}
               classes={db.classes}
+              subjects={activeSubjects}
               combinations={db.combinations}
               schoolName={db.settings.schoolName}
               academicYear={db.settings.academicYear}
@@ -920,16 +1082,44 @@ export default function App() {
                 const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
                 return res.url;
               }}
-              onBulkPromote={(ids, targetClassId) => {
+              onBulkPromote={(ids, options) => {
                 updateLocalTenantDb((prev) => ({
                   ...prev,
+                  settings:
+                    options.updateSchoolYear && options.targetAcademicYear
+                      ? { ...prev.settings, academicYear: options.targetAcademicYear }
+                      : prev.settings,
                   students: prev.students.map((s) =>
-                    ids.includes(s.id) ? { ...s, classId: targetClassId } : s
+                    ids.includes(s.id)
+                      ? {
+                          ...s,
+                          classId: options.targetClassId ?? s.classId,
+                          academicYear: options.targetAcademicYear ?? s.academicYear,
+                          status: options.targetStatus ?? s.status,
+                          offeredSubjectIds:
+                            options.resetElectives && options.targetClassId
+                              ? undefined
+                              : s.offeredSubjectIds,
+                        }
+                      : s
                   ),
                 }));
-                setNotice(`Promoted/transferred ${ids.length} student(s).`);
+                if (options.updateSchoolYear && options.targetAcademicYear) {
+                  updateLocalActiveSchool((prev) => ({
+                    ...prev,
+                    academicYear: options.targetAcademicYear!,
+                  }));
+                }
+                const targetClsName = options.targetClassId
+                  ? db.classes.find((c) => c.id === options.targetClassId)?.name
+                  : undefined;
+                setNotice(
+                  options.targetStatus === 'inactive' && !options.targetClassId
+                    ? `Marked ${ids.length} student(s) as graduated/inactive for ${options.targetAcademicYear ?? db.settings.academicYear}.`
+                    : `Promoted/transferred ${ids.length} student(s)${targetClsName ? ` to ${targetClsName}` : ''}.`
+                );
                 void runPersist(
-                  () => tenantApi.promoteStudents(ids, targetClassId),
+                  () => tenantApi.promoteStudents(ids, options),
                   'Failed to promote students.'
                 );
               }}
@@ -1126,20 +1316,25 @@ export default function App() {
             <MarksEntryView
               currentUser={currentUser}
               activeExam={activeExam}
+              exams={activeExams}
               activeClass={activeClass}
               classes={scopedClasses}
               subjects={activeSubjects}
               combinations={db.combinations}
               students={db.students}
               marksheets={db.marksheets}
+              correctionRequests={db.correctionRequests ?? []}
               settings={db.settings}
               initialSubjectId={activeSubjectId}
+              initialAssessment={activeAssessment}
+              onSelectExam={setActiveExamId}
               onSelectClass={(cid) => {
                 setActiveClassId(cid);
                 setActiveSubjectId('');
               }}
               onSaveMarksheetEntries={handleSaveMarksheetEntries}
               onSubmitMarksheet={handleSubmitMarksheet}
+              onRequestCorrection={handleRequestCorrection}
             />
           )}
 
@@ -1149,14 +1344,18 @@ export default function App() {
               activeExam={activeExam}
               classes={scopedClasses}
               subjects={activeSubjects}
+              combinations={db.combinations}
               students={db.students}
               users={db.users}
               marksheets={db.marksheets}
+              correctionRequests={db.correctionRequests ?? []}
               settings={db.settings}
               onApproveMarksheet={handleApproveMarksheet}
               onReturnMarksheet={handleReturnMarksheet}
               onReopenMarksheet={handleReopenMarksheet}
               onPublishAllApproved={handlePublishAllApproved}
+              onApproveCorrectionRequest={handleApproveCorrectionRequest}
+              onRejectCorrectionRequest={handleRejectCorrectionRequest}
             />
           )}
 

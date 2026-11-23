@@ -18,6 +18,7 @@ import type {
   BillingStatus,
   CurriculumScope,
   ExaminationPeriod,
+  MarksheetCorrectionRequest,
   MarksheetRecord,
   SchoolDatabase,
   SchoolSettings,
@@ -52,6 +53,7 @@ import {
   examinations,
   gradingConfigs,
   loginActivity,
+  marksheetCorrectionRequests,
   marksheets,
   schools,
   staffTeachers,
@@ -93,6 +95,7 @@ export interface TenantActorContext {
   uid: string;
   email: string;
   staffId?: string;
+  name?: string;
   role: UserRole;
 }
 
@@ -393,6 +396,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
         studentRows,
         examRows,
         marksheetRows,
+        correctionRequestRows,
         remarkRows,
         invoiceRows,
         activityRows,
@@ -406,6 +410,11 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
         tx.select().from(students).where(eq(students.schoolId, schoolId)),
         tx.select().from(examinations).where(eq(examinations.schoolId, schoolId)),
         tx.select().from(marksheets).where(eq(marksheets.schoolId, schoolId)),
+        tx
+          .select()
+          .from(marksheetCorrectionRequests)
+          .where(eq(marksheetCorrectionRequests.schoolId, schoolId))
+          .orderBy(desc(marksheetCorrectionRequests.createdAt)),
         tx.select().from(studentRemarks).where(eq(studentRemarks.schoolId, schoolId)),
         tx.select().from(subscriptionInvoices).where(eq(subscriptionInvoices.schoolId, schoolId)),
         tx.select().from(loginActivity).where(eq(loginActivity.schoolId, schoolId)),
@@ -517,6 +526,7 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           academicYear: stu.academicYear,
           status: stu.status as StudentProfile['status'],
           combinationId: stu.combinationId ?? undefined,
+          offeredSubjectIds: stu.offeredSubjectIds ?? undefined,
           parentName: stu.parentName ?? undefined,
           parentContact: stu.parentContact ?? undefined,
           photoDataUrl: stu.photoDataUrl ?? undefined,
@@ -552,6 +562,25 @@ export async function getTenantDatabase(schoolId: string): Promise<SchoolDatabas
           version: m.version ?? 1,
           lastModified: m.lastModified,
           auditHistory: m.auditHistory,
+        })),
+        correctionRequests: correctionRequestRows.map((cr) => ({
+          id: cr.id,
+          schoolId: cr.schoolId,
+          marksheetId: cr.marksheetId,
+          examId: cr.examId,
+          classId: cr.classId,
+          subjectId: cr.subjectId,
+          assessmentScope: cr.assessmentScope as MarksheetCorrectionRequest['assessmentScope'],
+          requestedByUserId: cr.requestedByUserId,
+          requestedByName: cr.requestedByName,
+          requestedByStaffId: cr.requestedByStaffId ?? undefined,
+          reason: cr.reason,
+          status: cr.status as MarksheetCorrectionRequest['status'],
+          reviewedByUserId: cr.reviewedByUserId ?? undefined,
+          reviewedByName: cr.reviewedByName ?? undefined,
+          reviewNote: cr.reviewNote ?? undefined,
+          createdAt: cr.createdAt,
+          reviewedAt: cr.reviewedAt ?? undefined,
         })),
         studentRemarks: remarksMap,
         settings,
@@ -647,6 +676,10 @@ export async function addStudentsWithQuotaCheck(
           academicYear: stu.academicYear,
           status: stu.status,
           combinationId: stu.combinationId ?? null,
+          offeredSubjectIds:
+            stu.offeredSubjectIds && stu.offeredSubjectIds.length > 0
+              ? stu.offeredSubjectIds
+              : null,
           parentName: stu.parentName ?? null,
           parentContact: stu.parentContact ?? null,
           photoDataUrl: stu.photoDataUrl ?? null,
@@ -679,6 +712,10 @@ export async function updateTenantStudent(schoolId: string, stu: StudentProfile)
           academicYear: stu.academicYear,
           status: stu.status,
           combinationId: stu.combinationId ?? null,
+          offeredSubjectIds:
+            stu.offeredSubjectIds && stu.offeredSubjectIds.length > 0
+              ? stu.offeredSubjectIds
+              : null,
           parentName: stu.parentName ?? null,
           parentContact: stu.parentContact ?? null,
           photoDataUrl: stu.photoDataUrl ?? null,
@@ -695,17 +732,83 @@ export async function updateTenantStudent(schoolId: string, stu: StudentProfile)
 export async function bulkPromoteTenantStudents(
   schoolId: string,
   studentIds: string[],
-  targetClassId: string
-) {
-  if (studentIds.length === 0) return;
+  options: {
+    targetClassId?: string;
+    targetAcademicYear?: string;
+    targetStatus?: 'active' | 'transferred' | 'inactive';
+    updateSchoolYear?: boolean;
+    resetElectives?: boolean;
+  }
+): Promise<{
+  updatedCount: number;
+  targetClassName?: string;
+  targetAcademicYear?: string;
+  targetStatus?: 'active' | 'transferred' | 'inactive';
+}> {
+  if (studentIds.length === 0) {
+    return { updatedCount: 0 };
+  }
   try {
-    await withTenantScope(schoolId, async (tx) => {
-      await tx
+    return await withTenantScope(schoolId, async (tx) => {
+      let targetClassName: string | undefined;
+      if (options.targetClassId) {
+        const [targetCls] = await tx
+          .select({ id: classesStreams.id, name: classesStreams.name })
+          .from(classesStreams)
+          .where(
+            and(
+              eq(classesStreams.schoolId, schoolId),
+              eq(classesStreams.id, options.targetClassId)
+            )
+          )
+          .limit(1);
+        if (!targetCls) {
+          throw new ValidationAppError('Selected destination class was not found in this school.');
+        }
+        targetClassName = targetCls.name;
+      }
+
+      const updatePatch: Partial<typeof students.$inferInsert> = {};
+      if (options.targetClassId) updatePatch.classId = options.targetClassId;
+      if (options.targetAcademicYear?.trim()) {
+        updatePatch.academicYear = options.targetAcademicYear.trim();
+      }
+      if (options.targetStatus) updatePatch.status = options.targetStatus;
+      if (options.resetElectives && options.targetClassId) {
+        updatePatch.offeredSubjectIds = null;
+      }
+
+      if (Object.keys(updatePatch).length === 0) {
+        return { updatedCount: 0 };
+      }
+
+      const updatedRows = await tx
         .update(students)
-        .set({ classId: targetClassId })
-        .where(and(eq(students.schoolId, schoolId), inArray(students.id, studentIds)));
+        .set(updatePatch)
+        .where(and(eq(students.schoolId, schoolId), inArray(students.id, studentIds)))
+        .returning({ id: students.id });
+
+      if (options.updateSchoolYear && options.targetAcademicYear?.trim()) {
+        await tx
+          .update(schools)
+          .set({
+            academicYear: options.targetAcademicYear.trim(),
+            updatedAt: new Date(),
+          })
+          .where(eq(schools.id, schoolId));
+      }
+
+      return {
+        updatedCount: updatedRows.length,
+        targetClassName,
+        targetAcademicYear: options.targetAcademicYear?.trim(),
+        targetStatus: options.targetStatus,
+      };
     });
   } catch (error) {
+    if (error instanceof ValidationAppError) {
+      throw error;
+    }
     console.error('Failed to bulk promote students:', error);
     throw new Error('Failed to promote selected students.', { cause: error });
   }
@@ -770,6 +873,7 @@ export async function queryTenantStudentsPaginated(
         academicYear: stu.academicYear,
         status: stu.status as StudentProfile['status'],
         combinationId: stu.combinationId ?? undefined,
+        offeredSubjectIds: stu.offeredSubjectIds ?? undefined,
         parentName: stu.parentName ?? undefined,
         parentContact: stu.parentContact ?? undefined,
         photoDataUrl: stu.photoDataUrl ?? undefined,
@@ -1320,18 +1424,61 @@ export async function upsertTenantMarksheet(
         }
       }
 
-      const existing = await tx
-        .select()
-        .from(marksheets)
-        .where(
-          and(
-            eq(marksheets.schoolId, schoolId),
-            eq(marksheets.examId, ms.examId),
-            eq(marksheets.classId, ms.classId),
-            eq(marksheets.subjectId, ms.subjectId)
+      const [existing, examRows, approvedCorrectionRows] = await Promise.all([
+        tx
+          .select()
+          .from(marksheets)
+          .where(
+            and(
+              eq(marksheets.schoolId, schoolId),
+              eq(marksheets.examId, ms.examId),
+              eq(marksheets.classId, ms.classId),
+              eq(marksheets.subjectId, ms.subjectId)
+            )
           )
-        )
-        .limit(1);
+          .limit(1),
+        tx
+          .select()
+          .from(examinations)
+          .where(and(eq(examinations.schoolId, schoolId), eq(examinations.id, ms.examId)))
+          .limit(1),
+        tx
+          .select()
+          .from(marksheetCorrectionRequests)
+          .where(
+            and(
+              eq(marksheetCorrectionRequests.schoolId, schoolId),
+              eq(marksheetCorrectionRequests.examId, ms.examId),
+              eq(marksheetCorrectionRequests.classId, ms.classId),
+              eq(marksheetCorrectionRequests.subjectId, ms.subjectId),
+              eq(marksheetCorrectionRequests.status, 'approved')
+            )
+          ),
+      ]);
+
+      const actorRole = actorContext ? normalizeUserRole(actorContext.role) : 'school_admin';
+      const isLeadership =
+        actorRole === 'dos' || actorRole === 'headteacher' || actorRole === 'school_admin';
+      const hasApprovedUnlock = approvedCorrectionRows.length > 0;
+
+      if (!isLeadership) {
+        if (existing[0]) {
+          const curStatus = existing[0].status;
+          if (
+            (curStatus === 'submitted' || curStatus === 'approved' || curStatus === 'published') &&
+            !hasApprovedUnlock
+          ) {
+            throw new PermissionError(
+              'This marksheet has already been submitted and locked. Submit a Correction Request for DOS approval before editing.'
+            );
+          }
+        }
+        if ((examRows[0]?.locked || examRows[0]?.published) && !hasApprovedUnlock) {
+          throw new PermissionError(
+            'This examination period is locked. Request DOS approval to re-correct submitted marks.'
+          );
+        }
+      }
 
       if (existing[0]) {
         const currentVersion = existing[0].version ?? 1;
@@ -1370,6 +1517,21 @@ export async function upsertTenantMarksheet(
           throw new ConflictError(
             'Concurrent update detected while saving marksheet. Refresh to load the latest version.'
           );
+        }
+
+        if (ms.status === 'submitted' && approvedCorrectionRows.length > 0) {
+          await tx
+            .update(marksheetCorrectionRequests)
+            .set({ status: 'completed' })
+            .where(
+              and(
+                eq(marksheetCorrectionRequests.schoolId, schoolId),
+                eq(marksheetCorrectionRequests.examId, ms.examId),
+                eq(marksheetCorrectionRequests.classId, ms.classId),
+                eq(marksheetCorrectionRequests.subjectId, ms.subjectId),
+                eq(marksheetCorrectionRequests.status, 'approved')
+              )
+            );
         }
 
         return {
@@ -1415,6 +1577,380 @@ export async function upsertTenantMarksheet(
     console.error('Failed to save marksheet:', error);
     throw new Error('Failed to save marksheet.', { cause: error });
   }
+}
+
+function mapCorrectionRequestRow(
+  cr: typeof marksheetCorrectionRequests.$inferSelect
+): MarksheetCorrectionRequest {
+  return {
+    id: cr.id,
+    schoolId: cr.schoolId,
+    marksheetId: cr.marksheetId,
+    examId: cr.examId,
+    classId: cr.classId,
+    subjectId: cr.subjectId,
+    assessmentScope: cr.assessmentScope as MarksheetCorrectionRequest['assessmentScope'],
+    requestedByUserId: cr.requestedByUserId,
+    requestedByName: cr.requestedByName,
+    requestedByStaffId: cr.requestedByStaffId ?? undefined,
+    reason: cr.reason,
+    status: cr.status as MarksheetCorrectionRequest['status'],
+    reviewedByUserId: cr.reviewedByUserId ?? undefined,
+    reviewedByName: cr.reviewedByName ?? undefined,
+    reviewNote: cr.reviewNote ?? undefined,
+    createdAt: cr.createdAt,
+    reviewedAt: cr.reviewedAt ?? undefined,
+  };
+}
+
+export async function createMarksheetCorrectionRequest(
+  schoolId: string,
+  input: {
+    marksheetId?: string;
+    examId: string;
+    classId: string;
+    subjectId: string;
+    assessmentScope: MarksheetCorrectionRequest['assessmentScope'];
+    reason: string;
+  },
+  actor: TenantActorContext
+): Promise<{ request: MarksheetCorrectionRequest; marksheet?: MarksheetRecord }> {
+  const now = new Date().toISOString();
+  return withTenantScope(schoolId, async (tx) => {
+    const actorRole = normalizeUserRole(actor.role);
+    const isLeadership =
+      actorRole === 'dos' || actorRole === 'headteacher' || actorRole === 'school_admin';
+
+    const [clsRows, staffRow, existingSheetRows, existingPendingRows] = await Promise.all([
+      tx
+        .select()
+        .from(classesStreams)
+        .where(and(eq(classesStreams.schoolId, schoolId), eq(classesStreams.id, input.classId)))
+        .limit(1),
+      resolveActorStaffRow(tx, schoolId, actor),
+      tx
+        .select()
+        .from(marksheets)
+        .where(
+          and(
+            eq(marksheets.schoolId, schoolId),
+            eq(marksheets.examId, input.examId),
+            eq(marksheets.classId, input.classId),
+            eq(marksheets.subjectId, input.subjectId)
+          )
+        )
+        .limit(1),
+      tx
+        .select()
+        .from(marksheetCorrectionRequests)
+        .where(
+          and(
+            eq(marksheetCorrectionRequests.schoolId, schoolId),
+            eq(marksheetCorrectionRequests.examId, input.examId),
+            eq(marksheetCorrectionRequests.classId, input.classId),
+            eq(marksheetCorrectionRequests.subjectId, input.subjectId),
+            eq(marksheetCorrectionRequests.status, 'pending')
+          )
+        )
+        .limit(1),
+    ]);
+
+    if (!isLeadership) {
+      const cls = clsRows[0];
+      const mappedTeacher = cls?.subjectTeacherMap?.[input.subjectId];
+      const isSubjectTeacher = matchesTeacherIdentifier(mappedTeacher, actor, staffRow, schoolId);
+      const isClassTeacher = matchesTeacherIdentifier(cls?.classTeacherId, actor, staffRow, schoolId);
+      const hasExplicitLists = Boolean(
+        staffRow &&
+          staffRow.assignedClassIds.includes(input.classId) &&
+          (staffRow.assignedSubjectIds.length === 0 ||
+            staffRow.assignedSubjectIds.includes(input.subjectId))
+      );
+      if (!isSubjectTeacher && !isClassTeacher && !hasExplicitLists) {
+        throw new PermissionError(
+          'Forbidden: You are not assigned to request marksheet corrections for this class and subject.'
+        );
+      }
+    }
+
+    if (existingPendingRows[0]) {
+      throw new ValidationAppError(
+        'A correction approval request for this marksheet is already pending DOS review.'
+      );
+    }
+
+    const existingSheet = existingSheetRows[0];
+    const resolvedMarksheetId =
+      existingSheet?.id ??
+      input.marksheetId ??
+      `${schoolId}:ms-${input.examId}-${input.classId}-${input.subjectId}`;
+
+    const requesterId = staffRow?.id ?? actor.uid;
+    const requesterName = staffRow?.name ?? actor.name ?? actor.email;
+    const requesterStaffId = staffRow?.staffId ?? actor.staffId ?? null;
+
+    const reqId = `cr-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`;
+    const [inserted] = await tx
+      .insert(marksheetCorrectionRequests)
+      .values({
+        id: reqId,
+        schoolId,
+        marksheetId: resolvedMarksheetId,
+        examId: input.examId,
+        classId: input.classId,
+        subjectId: input.subjectId,
+        assessmentScope: input.assessmentScope,
+        requestedByUserId: requesterId,
+        requestedByName: requesterName,
+        requestedByStaffId: requesterStaffId,
+        reason: input.reason.trim(),
+        status: 'pending',
+        createdAt: now,
+      })
+      .returning();
+
+    let updatedMarksheet: MarksheetRecord | undefined;
+    if (existingSheet) {
+      const nextHistory = [
+        ...existingSheet.auditHistory,
+        {
+          id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: now,
+          actorId: requesterId,
+          actorName: requesterName,
+          actorRole: actorRole,
+          action: 'Requested DOS Correction Approval',
+          details: `${input.assessmentScope === 'all' ? 'Full marksheet' : input.assessmentScope.toUpperCase()} — ${input.reason.trim()}`,
+        },
+      ];
+      const [msRow] = await tx
+        .update(marksheets)
+        .set({
+          version: (existingSheet.version ?? 1) + 1,
+          lastModified: now,
+          auditHistory: nextHistory,
+        })
+        .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.id, existingSheet.id)))
+        .returning();
+      if (msRow) {
+        updatedMarksheet = {
+          id: msRow.id,
+          examId: msRow.examId,
+          classId: msRow.classId,
+          subjectId: msRow.subjectId,
+          teacherId: msRow.teacherId,
+          status: msRow.status as MarksheetRecord['status'],
+          entries: msRow.entries,
+          submittedAt: msRow.submittedAt ?? undefined,
+          submittedBy: msRow.submittedBy ?? undefined,
+          approvedAt: msRow.approvedAt ?? undefined,
+          approvedBy: msRow.approvedBy ?? undefined,
+          dosComment: msRow.dosComment ?? undefined,
+          version: msRow.version ?? 1,
+          lastModified: msRow.lastModified,
+          auditHistory: msRow.auditHistory,
+        };
+      }
+    }
+
+    return {
+      request: mapCorrectionRequestRow(inserted),
+      marksheet: updatedMarksheet,
+    };
+  });
+}
+
+export async function approveMarksheetCorrectionRequest(
+  schoolId: string,
+  requestId: string,
+  actor: TenantActorContext,
+  reviewNote?: string
+): Promise<{ request: MarksheetCorrectionRequest; marksheet?: MarksheetRecord }> {
+  const now = new Date().toISOString();
+  return withTenantScope(schoolId, async (tx) => {
+    const [existingReq] = await tx
+      .select()
+      .from(marksheetCorrectionRequests)
+      .where(
+        and(
+          eq(marksheetCorrectionRequests.schoolId, schoolId),
+          eq(marksheetCorrectionRequests.id, requestId)
+        )
+      )
+      .limit(1);
+
+    if (!existingReq) {
+      throw new ValidationAppError('Correction request not found.');
+    }
+
+    const reviewerName = actor.name || actor.email;
+    const cleanNote = reviewNote?.trim() || 'Approved by DOS for score re-correction and resubmission.';
+
+    const [updatedReq] = await tx
+      .update(marksheetCorrectionRequests)
+      .set({
+        status: 'approved',
+        reviewedByUserId: actor.uid,
+        reviewedByName: reviewerName,
+        reviewNote: cleanNote,
+        reviewedAt: now,
+      })
+      .where(
+        and(
+          eq(marksheetCorrectionRequests.schoolId, schoolId),
+          eq(marksheetCorrectionRequests.id, requestId)
+        )
+      )
+      .returning();
+
+    const [existingSheet] = await tx
+      .select()
+      .from(marksheets)
+      .where(
+        and(
+          eq(marksheets.schoolId, schoolId),
+          eq(marksheets.examId, existingReq.examId),
+          eq(marksheets.classId, existingReq.classId),
+          eq(marksheets.subjectId, existingReq.subjectId)
+        )
+      )
+      .limit(1);
+
+    let updatedMarksheet: MarksheetRecord | undefined;
+    if (existingSheet) {
+      const nextHistory = [
+        ...existingSheet.auditHistory,
+        {
+          id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: now,
+          actorId: actor.uid,
+          actorName: reviewerName,
+          actorRole: normalizeUserRole(actor.role),
+          action: 'Correction Approved by DOS',
+          details: `${cleanNote} (Unlocked for ${existingReq.requestedByName})`,
+        },
+      ];
+      const [msRow] = await tx
+        .update(marksheets)
+        .set({
+          status: 'draft',
+          dosComment: cleanNote,
+          version: (existingSheet.version ?? 1) + 1,
+          lastModified: now,
+          auditHistory: nextHistory,
+        })
+        .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.id, existingSheet.id)))
+        .returning();
+
+      if (msRow) {
+        updatedMarksheet = {
+          id: msRow.id,
+          examId: msRow.examId,
+          classId: msRow.classId,
+          subjectId: msRow.subjectId,
+          teacherId: msRow.teacherId,
+          status: msRow.status as MarksheetRecord['status'],
+          entries: msRow.entries,
+          submittedAt: msRow.submittedAt ?? undefined,
+          submittedBy: msRow.submittedBy ?? undefined,
+          approvedAt: msRow.approvedAt ?? undefined,
+          approvedBy: msRow.approvedBy ?? undefined,
+          dosComment: msRow.dosComment ?? undefined,
+          version: msRow.version ?? 1,
+          lastModified: msRow.lastModified,
+          auditHistory: msRow.auditHistory,
+        };
+      }
+    }
+
+    return {
+      request: mapCorrectionRequestRow(updatedReq),
+      marksheet: updatedMarksheet,
+    };
+  });
+}
+
+export async function rejectMarksheetCorrectionRequest(
+  schoolId: string,
+  requestId: string,
+  actor: TenantActorContext,
+  reviewNote?: string
+): Promise<{ request: MarksheetCorrectionRequest }> {
+  const now = new Date().toISOString();
+  return withTenantScope(schoolId, async (tx) => {
+    const [existingReq] = await tx
+      .select()
+      .from(marksheetCorrectionRequests)
+      .where(
+        and(
+          eq(marksheetCorrectionRequests.schoolId, schoolId),
+          eq(marksheetCorrectionRequests.id, requestId)
+        )
+      )
+      .limit(1);
+
+    if (!existingReq) {
+      throw new ValidationAppError('Correction request not found.');
+    }
+
+    const reviewerName = actor.name || actor.email;
+    const cleanNote = reviewNote?.trim() || 'Correction request declined by DOS.';
+
+    const [updatedReq] = await tx
+      .update(marksheetCorrectionRequests)
+      .set({
+        status: 'rejected',
+        reviewedByUserId: actor.uid,
+        reviewedByName: reviewerName,
+        reviewNote: cleanNote,
+        reviewedAt: now,
+      })
+      .where(
+        and(
+          eq(marksheetCorrectionRequests.schoolId, schoolId),
+          eq(marksheetCorrectionRequests.id, requestId)
+        )
+      )
+      .returning();
+
+    const [existingSheet] = await tx
+      .select()
+      .from(marksheets)
+      .where(
+        and(
+          eq(marksheets.schoolId, schoolId),
+          eq(marksheets.examId, existingReq.examId),
+          eq(marksheets.classId, existingReq.classId),
+          eq(marksheets.subjectId, existingReq.subjectId)
+        )
+      )
+      .limit(1);
+
+    if (existingSheet) {
+      const nextHistory = [
+        ...existingSheet.auditHistory,
+        {
+          id: `aud-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: now,
+          actorId: actor.uid,
+          actorName: reviewerName,
+          actorRole: normalizeUserRole(actor.role),
+          action: 'Correction Request Declined',
+          details: cleanNote,
+        },
+      ];
+      await tx
+        .update(marksheets)
+        .set({
+          version: (existingSheet.version ?? 1) + 1,
+          lastModified: now,
+          auditHistory: nextHistory,
+        })
+        .where(and(eq(marksheets.schoolId, schoolId), eq(marksheets.id, existingSheet.id)));
+    }
+
+    return { request: mapCorrectionRequestRow(updatedReq) };
+  });
 }
 
 export async function publishAllApprovedTenantMarksheets(
@@ -1646,6 +2182,11 @@ export async function upsertTenantStaffMember(
   try {
     const cleanEmail = staff.email.trim().toLowerCase();
     const cleanUsername = staff.username.trim().toLowerCase() || cleanEmail.split('@')[0];
+    if (cleanEmail === 'superadmin@schuleflow.ac.ug' || cleanUsername === 'superadmin') {
+      throw new ValidationAppError(
+        'superadmin@schuleflow.ac.ug and username "superadmin" are reserved for the Platform Super Admin.'
+      );
+    }
     const normalizedRole = normalizeUserRole(staff.role);
     const normalizedPhone = normalizeStoredPhone(staff.phone);
     const rawId = staff.id.trim();
@@ -1813,6 +2354,9 @@ export async function upsertTenantStaffMember(
       };
     });
   } catch (error) {
+    if (error instanceof ValidationAppError) {
+      throw error;
+    }
     console.error('Failed to save staff member:', error);
     throw new Error('Failed to save staff account.', { cause: error });
   }
@@ -1851,6 +2395,11 @@ export async function bulkUpsertTenantStaff(
         const scopedId =
           existingMatch?.id ?? (staff.id.includes(':') ? staff.id : `${schoolId}:${staff.id}`);
         const cleanUsername = staff.username.trim().toLowerCase() || cleanEmail.split('@')[0];
+        if (cleanEmail === 'superadmin@schuleflow.ac.ug' || cleanUsername === 'superadmin') {
+          throw new ValidationAppError(
+            'superadmin@schuleflow.ac.ug and username "superadmin" are reserved for the Platform Super Admin.'
+          );
+        }
         const normalizedRole = normalizeUserRole(staff.role);
         const normalizedPhone = normalizeStoredPhone(staff.phone);
         const pwdHash =
@@ -1944,6 +2493,9 @@ export async function bulkUpsertTenantStaff(
       return savedResults;
     });
   } catch (error) {
+    if (error instanceof ValidationAppError) {
+      throw error;
+    }
     console.error('Failed to bulk upload staff members:', error);
     throw new Error('Failed to import staff directory.', { cause: error });
   }

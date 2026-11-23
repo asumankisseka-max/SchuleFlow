@@ -181,13 +181,40 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     );
     assert.equal(staffSave.status, 200);
     teacherAStaffId = staffSave.data.staff.staffId;
+    assert.ok(teacherAStaffId.length > 0 && teacherAStaffId.length < 4);
 
-    // Login Teacher A using generated Staff ID only + password (auto-resolves School A)
+    // Attempting to sign in with bare short numeric ID without School ID requires School ID (409)
+    const bareShortLogin = await apiJson<{ code?: string }>('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        identifier: teacherAStaffId,
+        password: 'TeacherPass2026!',
+      },
+    });
+    assert.equal(bareShortLogin.status, 409);
+    assert.equal(bareShortLogin.data.code, 'SCHOOL_CODE_REQUIRED');
+
+    // Login Teacher A using School ID + short Staff ID (both padded '005' and unpadded '5')
+    const shortUnpaddedLogin = await apiJson<{ token: string; user: { schoolId: string | null } }>(
+      '/api/v1/auth/login',
+      {
+        method: 'POST',
+        body: {
+          schoolCode: schoolACode,
+          identifier: String(Number(teacherAStaffId)),
+          password: 'TeacherPass2026!',
+        },
+      }
+    );
+    assert.equal(shortUnpaddedLogin.status, 200);
+    assert.equal(shortUnpaddedLogin.data.user.schoolId, schoolAId);
+
     const teacherLogin = await apiJson<{ token: string; user: { schoolId: string | null } }>(
       '/api/v1/auth/login',
       {
         method: 'POST',
         body: {
+          schoolCode: schoolACode,
           identifier: teacherAStaffId,
           password: 'TeacherPass2026!',
         },
@@ -458,6 +485,15 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
 
   it('automatically separates Super Admin from schools via credentials and enforces strict isolation & disambiguation', async () => {
     // 1. Seeded Super Admin & test Super Admin log in using ONLY identifier + password (no mode, no schoolCode)
+    const oldSaPwdRejected = await apiJson('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        identifier: 'superadmin@schuleflow.ac.ug',
+        password: 'admin@schuleflow',
+      },
+    });
+    assert.equal(oldSaPwdRejected.status, 401);
+
     const defaultSaLogin = await apiJson<{
       token: string;
       user: { email: string; globalRole: string; schoolId: string | null };
@@ -465,7 +501,7 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
       method: 'POST',
       body: {
         identifier: 'superadmin@schuleflow.ac.ug',
-        password: 'admin@schuleflow',
+        password: '#asu20man',
       },
     });
     assert.equal(defaultSaLogin.status, 200);
@@ -592,5 +628,477 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     assert.equal(disambiguatedLogin.data.user.schoolId, schoolBId);
     assert.equal(disambiguatedLogin.data.user.schoolCode, schoolBCode);
     assert.equal(disambiguatedLogin.data.user.schoolRole, 'dos');
+
+    // 4. School staff API rejects reserving superadmin email or username
+    const reservedAttempt = await apiJson(`/api/v1/schools/${schoolAId}/staff`, {
+      method: 'PUT',
+      token: adminAToken,
+      body: {
+        id: `${schoolAId}:usr-reserved`,
+        name: 'Should Be Rejected',
+        email: 'superadmin@schuleflow.ac.ug',
+        username: 'superadmin',
+        password: 'ValidPass2026!',
+        role: 'teacher',
+        active: true,
+        assignedClassIds: [],
+        assignedSubjectIds: [],
+      },
+    });
+    assert.equal(reservedAttempt.status, 400);
+
+    // 5. Even if a legacy database has a school_user row with the same email/password as a super_admin,
+    // Super Admin login without schoolCode succeeds directly instead of returning 409 SCHOOL_CODE_REQUIRED
+    const legacySchoolCollisionUid = `test:legacy-collision:${stamp}`;
+    await db.insert(users).values({
+      uid: legacySchoolCollisionUid,
+      staffId: '998',
+      email: superAdminEmail,
+      username: `sa_school_${stamp}`,
+      passwordHash: hashPassword('SuperAdminPass2026!'),
+      name: 'Legacy Colliding Row',
+      globalRole: 'school_user',
+      schoolId: schoolAId,
+      schoolRole: 'teacher',
+      active: true,
+    });
+    try {
+      const saDirectLogin = await apiJson<{
+        user: { globalRole: string; schoolId: string | null };
+      }>('/api/v1/auth/login', {
+        method: 'POST',
+        body: {
+          identifier: superAdminEmail,
+          password: 'SuperAdminPass2026!',
+        },
+      });
+      assert.equal(saDirectLogin.status, 200);
+      assert.equal(saDirectLogin.data.user.globalRole, 'super_admin');
+      assert.equal(saDirectLogin.data.user.schoolId, null);
+    } finally {
+      await db.delete(users).where(eq(users.uid, legacySchoolCollisionUid));
+    }
+  });
+
+  it('logs in and validates sessions in production mode without manual SESSION_SECRET env var', async () => {
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevTestMode = process.env.TEST_MODE;
+    const prevSessionSecret = process.env.SESSION_SECRET;
+
+    process.env.NODE_ENV = 'production';
+    delete process.env.TEST_MODE;
+    delete process.env.SESSION_SECRET;
+
+    try {
+      const prodLogin = await apiJson<{
+        token: string;
+        user: { email: string; globalRole: string };
+      }>('/api/v1/auth/login', {
+        method: 'POST',
+        body: {
+          identifier: 'superadmin@schuleflow.ac.ug',
+          password: '#asu20man',
+        },
+      });
+      assert.equal(prodLogin.status, 200);
+      assert.ok(prodLogin.data.token);
+      assert.equal(prodLogin.data.user.globalRole, 'super_admin');
+
+      const syncRes = await apiJson<{ user: { email: string } }>('/api/v1/auth/sync', {
+        method: 'POST',
+        token: prodLogin.data.token,
+        body: {},
+      });
+      assert.equal(syncRes.status, 200);
+      assert.equal(syncRes.data.user.email, 'superadmin@schuleflow.ac.ug');
+    } finally {
+      if (prevNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = prevNodeEnv;
+      if (prevTestMode === undefined) delete process.env.TEST_MODE;
+      else process.env.TEST_MODE = prevTestMode;
+      if (prevSessionSecret === undefined) delete process.env.SESSION_SECRET;
+      else process.env.SESSION_SECRET = prevSessionSecret;
+    }
+  });
+
+  it('supports direct partial marks submission, correction requests, DOS approval unlock, resubmission, and rejection', async () => {
+    // Ensure at least 2 active students offering subjectAId exist in classAId
+    const seedStuRes = await apiJson<{
+      students: Array<{ id: string; classId: string; offeredSubjectIds?: string[] }>;
+    }>(`/api/v1/schools/${schoolAId}/students`, {
+      method: 'POST',
+      token: adminAToken,
+      body: {
+        students: [
+          {
+            id: `${schoolAId}:stu-corr-1`,
+            admissionNo: `ADM-${stamp}-1`,
+            fullName: 'Student Correction One',
+            gender: 'F',
+            classId: classAId,
+            academicYear: '2026',
+            status: 'active',
+            offeredSubjectIds: [subjectAId],
+          },
+          {
+            id: `${schoolAId}:stu-corr-2`,
+            admissionNo: `ADM-${stamp}-2`,
+            fullName: 'Student Correction Two',
+            gender: 'M',
+            classId: classAId,
+            academicYear: '2026',
+            status: 'active',
+            offeredSubjectIds: [subjectAId],
+          },
+        ],
+      },
+    });
+    assert.equal(seedStuRes.status, 201);
+    assert.deepEqual(seedStuRes.data.students[0].offeredSubjectIds, [subjectAId]);
+
+    // Load latest bootstrap state to get active students in classAId and latest marksheet version
+    const bootRes = await apiJson<{
+      db: {
+        students: Array<{ id: string; classId: string; status: string; offeredSubjectIds?: string[] }>;
+        marksheets: Array<{ id: string; examId: string; classId: string; subjectId: string; version?: number }>;
+      };
+    }>(`/api/v1/schools/${schoolAId}/bootstrap`, { token: teacherAToken });
+    assert.equal(bootRes.status, 200);
+
+    const classStudents = bootRes.data.db.students.filter(
+      (s) => s.classId === classAId && s.status === 'active'
+    );
+    assert.ok(classStudents.length >= 2);
+    const existingMs = bootRes.data.db.marksheets.find(
+      (m) => m.examId === examAId && m.classId === classAId && m.subjectId === subjectAId
+    );
+    const currentVersion = existingMs?.version ?? 2;
+
+    // 1. Teacher submits results directly even when some assessment marks are still missing
+    const partialEntries: Record<string, { u1?: string; u2?: string; u3?: string; eot?: string }> = {
+      [classStudents[0].id]: { u1: '84', u2: '79' },
+      [classStudents[1].id]: { u1: '68' }, // Missing u2, u3, eot
+    };
+
+    const directSubmit = await apiJson<{
+      marksheet: { id: string; status: string; version: number; entries: typeof partialEntries };
+    }>(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        id: existingMs?.id ?? `ms-${examAId}-${classAId}-${subjectAId}`,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        teacherId: teacherAId,
+        status: 'submitted',
+        submittedAt: new Date().toISOString(),
+        submittedBy: teacherAId,
+        version: currentVersion,
+        entries: partialEntries,
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(directSubmit.status, 200);
+    assert.equal(directSubmit.data.marksheet.status, 'submitted');
+    assert.equal(directSubmit.data.marksheet.entries[classStudents[0].id].u1, '84');
+
+    // 2. Teacher cannot overwrite a submitted marksheet directly without DOS approval
+    const directOverwrite = await apiJson(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        id: directSubmit.data.marksheet.id,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        teacherId: teacherAId,
+        status: 'submitted',
+        version: directSubmit.data.marksheet.version,
+        entries: {
+          ...partialEntries,
+          [classStudents[1].id]: { u1: '68', u2: '72' },
+        },
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(directOverwrite.status, 403);
+
+    // 3. Teacher cannot request correction for an unassigned subject
+    const unauthorizedReq = await apiJson(
+      `/api/v1/schools/${schoolAId}/marksheets/correction-requests`,
+      {
+        method: 'POST',
+        token: teacherAToken,
+        body: {
+          examId: examAId,
+          classId: classAId,
+          subjectId: unassignedSubjectAId,
+          assessmentScope: 'u2',
+          reason: 'Should fail for unassigned subject',
+        },
+      }
+    );
+    assert.equal(unauthorizedReq.status, 403);
+
+    // 4. Teacher submits valid correction request to DOS
+    const createReq = await apiJson<{
+      request: { id: string; status: string; assessmentScope: string };
+      marksheet?: { version: number };
+    }>(`/api/v1/schools/${schoolAId}/marksheets/correction-requests`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        marksheetId: directSubmit.data.marksheet.id,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        assessmentScope: 'u2',
+        reason: 'Need to enter missing U2 score for student after illness',
+      },
+    });
+    assert.equal(createReq.status, 201);
+    assert.equal(createReq.data.request.status, 'pending');
+    const reqId = createReq.data.request.id;
+
+    // Duplicate pending request is rejected with 400
+    const duplicateReq = await apiJson(
+      `/api/v1/schools/${schoolAId}/marksheets/correction-requests`,
+      {
+        method: 'POST',
+        token: teacherAToken,
+        body: {
+          marksheetId: directSubmit.data.marksheet.id,
+          examId: examAId,
+          classId: classAId,
+          subjectId: subjectAId,
+          assessmentScope: 'u2',
+          reason: 'Duplicate request should be rejected',
+        },
+      }
+    );
+    assert.equal(duplicateReq.status, 400);
+
+    // 5. Teacher cannot self-approve correction request
+    const selfApprove = await apiJson(
+      `/api/v1/schools/${schoolAId}/correction-requests/${encodeURIComponent(reqId)}/approve`,
+      {
+        method: 'POST',
+        token: teacherAToken,
+        body: {},
+      }
+    );
+    assert.equal(selfApprove.status, 403);
+
+    // 6. DOS / School Admin approves request -> marksheet immediately unlocks to 'draft'
+    const dosApprove = await apiJson<{
+      request: { id: string; status: string };
+      marksheet?: { id: string; status: string; version: number };
+    }>(
+      `/api/v1/schools/${schoolAId}/correction-requests/${encodeURIComponent(reqId)}/approve`,
+      {
+        method: 'POST',
+        token: adminAToken,
+        body: { reviewNote: 'Approved to fill missing U2 score.' },
+      }
+    );
+    assert.equal(dosApprove.status, 200);
+    assert.equal(dosApprove.data.request.status, 'approved');
+    assert.equal(dosApprove.data.marksheet?.status, 'draft');
+
+    // 7. Teacher re-edits and resubmits the unlocked marksheet -> request transitions to 'completed'
+    const resubmit = await apiJson<{
+      marksheet: { status: string; version: number; entries: Record<string, { u1?: string; u2?: string }> };
+    }>(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        id: directSubmit.data.marksheet.id,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        teacherId: teacherAId,
+        status: 'submitted',
+        submittedAt: new Date().toISOString(),
+        submittedBy: teacherAId,
+        version: dosApprove.data.marksheet!.version,
+        entries: {
+          ...partialEntries,
+          [classStudents[1].id]: { u1: '68', u2: '75' },
+        },
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(resubmit.status, 200);
+    assert.equal(resubmit.data.marksheet.status, 'submitted');
+    assert.equal(resubmit.data.marksheet.entries[classStudents[1].id].u2, '75');
+
+    const afterBoot = await apiJson<{
+      db: {
+        correctionRequests?: Array<{ id: string; status: string }>;
+      };
+    }>(`/api/v1/schools/${schoolAId}/bootstrap`, { token: teacherAToken });
+    assert.equal(afterBoot.status, 200);
+    const completedReq = afterBoot.data.db.correctionRequests?.find((r) => r.id === reqId);
+    assert.equal(completedReq?.status, 'completed');
+
+    // 8. Subsequent direct edit by teacher is blocked again until another DOS approval
+    const postResubmitOverwrite = await apiJson(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        id: directSubmit.data.marksheet.id,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        teacherId: teacherAId,
+        status: 'submitted',
+        version: resubmit.data.marksheet.version,
+        entries: partialEntries,
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(postResubmitOverwrite.status, 403);
+
+    // 9. Second request declined by DOS keeps sheet locked
+    const req2 = await apiJson<{ request: { id: string } }>(
+      `/api/v1/schools/${schoolAId}/marksheets/correction-requests`,
+      {
+        method: 'POST',
+        token: teacherAToken,
+        body: {
+          marksheetId: directSubmit.data.marksheet.id,
+          examId: examAId,
+          classId: classAId,
+          subjectId: subjectAId,
+          assessmentScope: 'eot',
+          reason: 'Requesting EoT edit after deadline',
+        },
+      }
+    );
+    assert.equal(req2.status, 201);
+
+    const dosReject = await apiJson<{ request: { status: string } }>(
+      `/api/v1/schools/${schoolAId}/correction-requests/${encodeURIComponent(req2.data.request.id)}/reject`,
+      {
+        method: 'POST',
+        token: adminAToken,
+        body: { reviewNote: 'Deadline closed.' },
+      }
+    );
+    assert.equal(dosReject.status, 200);
+    assert.equal(dosReject.data.request.status, 'rejected');
+
+    const stillLocked = await apiJson(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: teacherAToken,
+      body: {
+        id: directSubmit.data.marksheet.id,
+        examId: examAId,
+        classId: classAId,
+        subjectId: subjectAId,
+        teacherId: teacherAId,
+        status: 'submitted',
+        version: resubmit.data.marksheet.version,
+        entries: partialEntries,
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(stillLocked.status, 403);
+  });
+
+  it('supports end-of-year student promotion, elective reset, academic year advance, and graduating finalists', async () => {
+    const destClassId = `${schoolAId}:cls-promo-target`;
+    const createDest = await apiJson<{ cls: { id: string } }>(
+      `/api/v1/schools/${schoolAId}/classes`,
+      {
+        method: 'PUT',
+        token: adminAToken,
+        body: {
+          cls: {
+            id: destClassId,
+            gradeLevel: 'S.4',
+            stream: 'North',
+            level: 'olevel',
+            classTeacherId: '',
+            subjectIds: [subjectAId, unassignedSubjectAId],
+            subjectTeacherMap: {},
+          },
+        },
+      }
+    );
+    assert.equal(createDest.status, 200);
+
+    const stu1Id = `${schoolAId}:stu-corr-1`;
+    const stu2Id = `${schoolAId}:stu-corr-2`;
+
+    // Promote stu1 to S.4 North for 2027, reset custom electives, and advance school year
+    const promoRes = await apiJson<{
+      updatedCount: number;
+      targetClassName?: string;
+      targetAcademicYear?: string;
+    }>(`/api/v1/schools/${schoolAId}/students/promote`, {
+      method: 'POST',
+      token: adminAToken,
+      body: {
+        studentIds: [stu1Id],
+        targetClassId: destClassId,
+        targetAcademicYear: '2027',
+        resetElectives: true,
+        updateSchoolYear: true,
+      },
+    });
+    assert.equal(promoRes.status, 200);
+    assert.equal(promoRes.data.updatedCount, 1);
+    assert.equal(promoRes.data.targetAcademicYear, '2027');
+
+    // Graduate stu2 (mark inactive)
+    const gradRes = await apiJson<{ updatedCount: number; targetStatus?: string }>(
+      `/api/v1/schools/${schoolAId}/students/promote`,
+      {
+        method: 'POST',
+        token: adminAToken,
+        body: {
+          studentIds: [stu2Id],
+          targetStatus: 'inactive',
+          targetAcademicYear: '2027',
+        },
+      }
+    );
+    assert.equal(gradRes.status, 200);
+    assert.equal(gradRes.data.updatedCount, 1);
+    assert.equal(gradRes.data.targetStatus, 'inactive');
+
+    const bootAfter = await apiJson<{
+      db: {
+        settings: { academicYear: string };
+        students: Array<{
+          id: string;
+          classId: string;
+          academicYear: string;
+          status: string;
+          offeredSubjectIds?: string[];
+        }>;
+      };
+    }>(`/api/v1/schools/${schoolAId}/bootstrap`, { token: adminAToken });
+    assert.equal(bootAfter.status, 200);
+    assert.equal(bootAfter.data.db.settings.academicYear, '2027');
+
+    const promotedStu1 = bootAfter.data.db.students.find((s) => s.id === stu1Id);
+    assert.ok(promotedStu1);
+    assert.equal(promotedStu1.classId, destClassId);
+    assert.equal(promotedStu1.academicYear, '2027');
+    assert.equal(promotedStu1.offeredSubjectIds, undefined);
+
+    const graduatedStu2 = bootAfter.data.db.students.find((s) => s.id === stu2Id);
+    assert.ok(graduatedStu2);
+    assert.equal(graduatedStu2.status, 'inactive');
+    assert.equal(graduatedStu2.academicYear, '2027');
   });
 });
+

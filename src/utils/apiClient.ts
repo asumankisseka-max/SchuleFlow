@@ -1,9 +1,11 @@
 import type {
+  AssessmentComponent,
   AuditLogRecord,
   AuthSessionProfile,
   BillingStatus,
   CurriculumScope,
   ExaminationPeriod,
+  MarksheetCorrectionRequest,
   MarksheetRecord,
   PublicSchoolBranding,
   SchoolDatabase,
@@ -352,12 +354,33 @@ export function createTenantApi(schoolId: string) {
         schoolId
       ),
 
-    promoteStudents: (studentIds: string[], targetClassId: string) =>
-      requestJson<{ ok: boolean }>(
+    promoteStudents: (
+      studentIds: string[],
+      options:
+        | string
+        | {
+            targetClassId?: string;
+            targetAcademicYear?: string;
+            targetStatus?: 'active' | 'transferred' | 'inactive';
+            updateSchoolYear?: boolean;
+            resetElectives?: boolean;
+          }
+    ) => {
+      const payload =
+        typeof options === 'string'
+          ? { studentIds, targetClassId: options }
+          : { studentIds, ...options };
+      return requestJson<{
+        ok: boolean;
+        updatedCount?: number;
+        targetClassName?: string;
+        targetAcademicYear?: string;
+      }>(
         `${base}/students/promote`,
-        { method: 'POST', body: JSON.stringify({ studentIds, targetClassId }) },
+        { method: 'POST', body: JSON.stringify(payload) },
         schoolId
-      ),
+      );
+    },
 
     saveClass: (cls: StreamClass, attachToExamId?: string) =>
       requestJson<{ cls: StreamClass }>(
@@ -419,6 +442,34 @@ export function createTenantApi(schoolId: string) {
       requestJson<{ marksheet: MarksheetRecord }>(
         `${base}/marksheets`,
         { method: 'POST', body: JSON.stringify(marksheet) },
+        schoolId
+      ),
+
+    requestMarksheetCorrection: (payload: {
+      marksheetId?: string;
+      examId: string;
+      classId: string;
+      subjectId: string;
+      assessmentScope: AssessmentComponent;
+      reason: string;
+    }) =>
+      requestJson<{ request: MarksheetCorrectionRequest; marksheet?: MarksheetRecord }>(
+        `${base}/marksheets/correction-requests`,
+        { method: 'POST', body: JSON.stringify(payload) },
+        schoolId
+      ),
+
+    approveCorrectionRequest: (requestId: string, reviewNote?: string) =>
+      requestJson<{ request: MarksheetCorrectionRequest; marksheet?: MarksheetRecord }>(
+        `${base}/correction-requests/${encodeURIComponent(requestId)}/approve`,
+        { method: 'POST', body: JSON.stringify({ reviewNote }) },
+        schoolId
+      ),
+
+    rejectCorrectionRequest: (requestId: string, reviewNote?: string) =>
+      requestJson<{ request: MarksheetCorrectionRequest }>(
+        `${base}/correction-requests/${encodeURIComponent(requestId)}/reject`,
+        { method: 'POST', body: JSON.stringify({ reviewNote }) },
         schoolId
       ),
 

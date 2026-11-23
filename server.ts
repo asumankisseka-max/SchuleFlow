@@ -10,11 +10,13 @@ import {
   PermissionError,
   ValidationAppError,
   addStudentsWithQuotaCheck,
+  approveMarksheetCorrectionRequest,
   archiveOrDeleteTenantClass,
   archiveOrDeleteTenantExam,
   archiveOrDeleteTenantSubject,
   bulkPromoteTenantStudents,
   bulkUpsertTenantStaff,
+  createMarksheetCorrectionRequest,
   deleteSchoolTenant,
   deleteTenantCombination,
   deleteTenantStudent,
@@ -30,6 +32,7 @@ import {
   queryTenantMarksheetsFiltered,
   queryTenantStudentsPaginated,
   recordAuditLog,
+  rejectMarksheetCorrectionRequest,
   resetTenantStaffPasswordByAdmin,
   updateSchoolSubscription,
   updateTenantSettingsAndGrading,
@@ -62,6 +65,8 @@ import {
   bulkStaffSchema,
   changePasswordSchema,
   combinationSchema,
+  correctionRequestCreateSchema,
+  correctionRequestReviewSchema,
   createStudentsBodySchema,
   examSchema,
   loginSchema,
@@ -107,7 +112,18 @@ import type {
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
+
+function isSecureRequest(req: express.Request): boolean {
+  if (req.secure) return true;
+  const fwdProto = req.headers['x-forwarded-proto'];
+  if (typeof fwdProto === 'string' && fwdProto.split(',')[0].trim().toLowerCase() === 'https') {
+    return true;
+  }
+  const host = (req.hostname || '').toLowerCase();
+  return process.env.NODE_ENV === 'production' && host !== 'localhost' && host !== '127.0.0.1';
+}
 
   /* ------------------------------------------------------------------------ */
   /* Auth & Session Context Routes (Pure PostgreSQL + HttpOnly Cookie/Bearer) */
@@ -186,7 +202,7 @@ app.use(express.json({ limit: '10mb' }));
       res.cookie(SESSION_COOKIE_NAME, token, {
         httpOnly: true,
         sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        secure: isSecureRequest(req),
         path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
@@ -288,7 +304,7 @@ app.use(express.json({ limit: '10mb' }));
       res.cookie(SESSION_COOKIE_NAME, refreshedToken, {
         httpOnly: true,
         sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        secure: isSecureRequest(req),
         path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
@@ -344,6 +360,7 @@ app.use(express.json({ limit: '10mb' }));
 
   app.post('/api/v1/auth/recover/verify', recoveryRateLimiter, async (req, res) => {
     try {
+      await ensureInitialTenantsSeeded();
       const { recoveryToken, verification } = req.body as {
         recoveryToken?: string;
         verification?: string;
@@ -380,6 +397,7 @@ app.use(express.json({ limit: '10mb' }));
 
   app.post('/api/v1/auth/recover/reset-password', recoveryRateLimiter, async (req, res) => {
     try {
+      await ensureInitialTenantsSeeded();
       const { resetToken, newPassword } = req.body as {
         resetToken?: string;
         newPassword?: string;
@@ -421,6 +439,7 @@ app.use(express.json({ limit: '10mb' }));
 
   app.post('/api/v1/auth/recover/request-admin', recoveryRateLimiter, async (req, res) => {
     try {
+      await ensureInitialTenantsSeeded();
       const { recoveryToken, note } = req.body as {
         recoveryToken?: string;
         note?: string;
@@ -713,13 +732,30 @@ app.use(express.json({ limit: '10mb' }));
           return res.status(400).json({ error: parsed.error });
         }
         const schoolId = req.schoolId!;
-        await bulkPromoteTenantStudents(
+        const result = await bulkPromoteTenantStudents(schoolId, parsed.data.studentIds, {
+          targetClassId: parsed.data.targetClassId,
+          targetAcademicYear: parsed.data.targetAcademicYear,
+          targetStatus: parsed.data.targetStatus,
+          updateSchoolYear: parsed.data.updateSchoolYear,
+          resetElectives: parsed.data.resetElectives,
+        });
+        await recordAuditLog({
+          userId: req.dbUser!.uid,
+          userEmail: req.dbUser!.email,
+          userRole: req.dbUser!.schoolRole,
           schoolId,
-          parsed.data.studentIds,
-          parsed.data.targetClassId
-        );
-        res.json({ ok: true });
+          action: 'STUDENTS_PROMOTED',
+          details: `${req.dbUser!.name} promoted/updated ${result.updatedCount} student(s)${
+            result.targetClassName ? ` to ${result.targetClassName}` : ''
+          }${result.targetAcademicYear ? ` (${result.targetAcademicYear})` : ''}${
+            result.targetStatus ? ` [status: ${result.targetStatus}]` : ''
+          }.`,
+        });
+        res.json({ ok: true, ...result });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to promote students.';
         res.status(500).json({ error: message });
       }
@@ -949,6 +985,7 @@ app.use(express.json({ limit: '10mb' }));
             uid: dbUser.uid,
             email: dbUser.email,
             staffId: dbUser.staffId,
+            name: dbUser.name,
             role: dbUser.schoolRole,
           }
         );
@@ -958,6 +995,137 @@ app.use(express.json({ limit: '10mb' }));
           return res.status(error.status).json({ error: error.message });
         }
         const message = error instanceof Error ? error.message : 'Failed to save marksheet.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/marksheets/correction-requests',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('teacher', 'class_teacher', 'dos', 'headteacher', 'school_admin'),
+    async (req: AuthRequest, res) => {
+      try {
+        const parsed = parseWithSchema(correctionRequestCreateSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const dbUser = req.dbUser!;
+        const result = await createMarksheetCorrectionRequest(
+          req.schoolId!,
+          parsed.data,
+          {
+            uid: dbUser.uid,
+            email: dbUser.email,
+            staffId: dbUser.staffId,
+            name: dbUser.name,
+            role: dbUser.schoolRole,
+          }
+        );
+        await recordAuditLog({
+          userId: dbUser.uid,
+          userEmail: dbUser.email,
+          userRole: dbUser.schoolRole,
+          schoolId: req.schoolId!,
+          action: 'CORRECTION_REQUEST_SUBMITTED',
+          details: `${dbUser.name} requested DOS approval to re-correct ${parsed.data.classId} / ${parsed.data.subjectId} (${parsed.data.assessmentScope}): ${parsed.data.reason}`,
+        });
+        res.status(201).json(result);
+      } catch (error: unknown) {
+        if (error instanceof PermissionError || error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message =
+          error instanceof Error ? error.message : 'Failed to submit correction request.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/correction-requests/:requestId/approve',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('dos', 'headteacher', 'school_admin'),
+    async (req: AuthRequest, res) => {
+      try {
+        const parsed = parseWithSchema(correctionRequestReviewSchema, req.body ?? {});
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const dbUser = req.dbUser!;
+        const result = await approveMarksheetCorrectionRequest(
+          req.schoolId!,
+          req.params.requestId,
+          {
+            uid: dbUser.uid,
+            email: dbUser.email,
+            staffId: dbUser.staffId,
+            name: dbUser.name,
+            role: dbUser.schoolRole,
+          },
+          parsed.data.reviewNote
+        );
+        await recordAuditLog({
+          userId: dbUser.uid,
+          userEmail: dbUser.email,
+          userRole: dbUser.schoolRole,
+          schoolId: req.schoolId!,
+          action: 'CORRECTION_REQUEST_APPROVED',
+          details: `${dbUser.name} approved correction request ${req.params.requestId} for ${result.request.requestedByName}. Marksheet unlocked for resubmission.`,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof PermissionError || error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message =
+          error instanceof Error ? error.message : 'Failed to approve correction request.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/schools/:schoolId/correction-requests/:requestId/reject',
+    requireAuth,
+    requireTenantScope,
+    requireRoles('dos', 'headteacher', 'school_admin'),
+    async (req: AuthRequest, res) => {
+      try {
+        const parsed = parseWithSchema(correctionRequestReviewSchema, req.body ?? {});
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const dbUser = req.dbUser!;
+        const result = await rejectMarksheetCorrectionRequest(
+          req.schoolId!,
+          req.params.requestId,
+          {
+            uid: dbUser.uid,
+            email: dbUser.email,
+            staffId: dbUser.staffId,
+            name: dbUser.name,
+            role: dbUser.schoolRole,
+          },
+          parsed.data.reviewNote
+        );
+        await recordAuditLog({
+          userId: dbUser.uid,
+          userEmail: dbUser.email,
+          userRole: dbUser.schoolRole,
+          schoolId: req.schoolId!,
+          action: 'CORRECTION_REQUEST_DECLINED',
+          details: `${dbUser.name} declined correction request ${req.params.requestId} for ${result.request.requestedByName}.`,
+        });
+        res.json(result);
+      } catch (error: unknown) {
+        if (error instanceof PermissionError || error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        const message =
+          error instanceof Error ? error.message : 'Failed to decline correction request.';
         res.status(500).json({ error: message });
       }
     }
@@ -1065,6 +1233,9 @@ app.use(express.json({ limit: '10mb' }));
         });
         res.json({ staff: saved });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to save staff account.';
         res.status(500).json({ error: message });
       }
@@ -1098,6 +1269,9 @@ app.use(express.json({ limit: '10mb' }));
           staff: saved.map((s) => ({ ...s, password: '********' })),
         });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to import staff accounts.';
         res.status(500).json({ error: message });
       }

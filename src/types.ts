@@ -108,6 +108,7 @@ export interface StudentProfile {
   academicYear: string;
   status: StudentStatus;
   combinationId?: string; // A'Level combination
+  offeredSubjectIds?: string[]; // Specific subjects offered by student (electives/overrides)
   parentName?: string;
   parentContact?: string;
   photoDataUrl?: string;
@@ -152,6 +153,30 @@ export interface MarkEntryItem {
   competencyObservation?: string;
   exempted?: boolean;
   missed?: boolean;
+}
+
+export type AssessmentComponent = 'all' | 'u1' | 'u2' | 'u3' | 'eot';
+
+export type CorrectionRequestStatus = 'pending' | 'approved' | 'rejected' | 'completed';
+
+export interface MarksheetCorrectionRequest {
+  id: string;
+  schoolId: string;
+  marksheetId: string;
+  examId: string;
+  classId: string;
+  subjectId: string;
+  assessmentScope: AssessmentComponent;
+  requestedByUserId: string;
+  requestedByName: string;
+  requestedByStaffId?: string;
+  reason: string;
+  status: CorrectionRequestStatus;
+  reviewedByUserId?: string;
+  reviewedByName?: string;
+  reviewNote?: string;
+  createdAt: string;
+  reviewedAt?: string;
 }
 
 export interface MarksheetRecord {
@@ -356,6 +381,7 @@ export interface SchoolDatabase {
   students: StudentProfile[];
   exams: ExaminationPeriod[];
   marksheets: MarksheetRecord[];
+  correctionRequests?: MarksheetCorrectionRequest[];
   studentRemarks: Record<string, StudentTermRemarks>; // key `${examId}:${studentId}`
   settings: SchoolSettings;
   reportsGeneratedCount: number;
@@ -391,6 +417,7 @@ export interface StudentRecord {
   gender: 'M' | 'F';
   combinationCode?: string;
   combinationName?: string;
+  offeredSubjectIds?: string[];
   photoDataUrl?: string;
   marks: Record<string, string>;
   cbcMarks?: Record<string, CbcSubjectMarks>;

@@ -65,15 +65,24 @@ export function generateNextSchoolCode(schoolName: string, existingCodes: string
 
 /**
  * Computes the next sequential numeric suffix for a school-scoped entity ID prefix.
+ * Supports both short Staff IDs (`001`, `12`) and legacy prefixed IDs (`KHS-TCH-001`).
  */
 export function getNextSequenceNumber(existingIds: Array<string | null | undefined>, marker: 'TCH' | 'STD'): number {
-  const regex = new RegExp(`-${marker}-(\\d+)$`, 'i');
+  const markerRegex = new RegExp(`-${marker}-(\\d+)$`, 'i');
   let maxSeq = 0;
   for (const id of existingIds) {
     if (!id) continue;
-    const match = id.trim().match(regex);
-    if (match) {
-      const n = Number(match[1]);
+    const trimmed = id.trim();
+    const markerMatch = trimmed.match(markerRegex);
+    if (markerMatch) {
+      const n = Number(markerMatch[1]);
+      if (Number.isFinite(n) && n > maxSeq) {
+        maxSeq = n;
+      }
+      continue;
+    }
+    if (marker === 'TCH' && /^\d+$/.test(trimmed)) {
+      const n = Number(trimmed);
       if (Number.isFinite(n) && n > maxSeq) {
         maxSeq = n;
       }
@@ -82,9 +91,24 @@ export function getNextSequenceNumber(existingIds: Array<string | null | undefin
   return maxSeq + 1;
 }
 
-export function formatStaffId(schoolInitials: string, seqNumber: number): string {
-  const prefix = schoolInitials.replace(/[^A-Z0-9]/gi, '').toUpperCase() || 'SCH';
-  return `${prefix}-TCH-${String(seqNumber).padStart(3, '0')}`;
+/**
+ * Formats an easy-to-remember school-scoped Staff ID (< 4 characters, e.g. 001, 002).
+ * Scoped uniquely per school after entering the School ID.
+ */
+export function formatStaffId(_schoolInitials: string, seqNumber: number): string {
+  return String(seqNumber).padStart(3, '0');
+}
+
+/**
+ * Normalizes a short numeric Staff ID typed at sign-in (e.g. "1", "01", "001" -> "001").
+ * Returns null for non-numeric or >= 4 digit identifiers.
+ */
+export function normalizeShortStaffIdCandidate(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!/^\d{1,3}$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return String(num).padStart(3, '0');
 }
 
 export function formatStudentId(schoolInitials: string, seqNumber: number): string {

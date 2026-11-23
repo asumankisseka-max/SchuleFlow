@@ -268,7 +268,7 @@ export function AccountRecoveryModal({
                       disabled={loading}
                       value={schoolCodeInput}
                       onChange={(e) => setSchoolCodeInput(e.target.value.toUpperCase())}
-                      placeholder="e.g. KHHS-101"
+                      placeholder="e.g. JIS-101"
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm uppercase text-slate-900 placeholder:normal-case placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                     />
                   </div>
@@ -282,7 +282,7 @@ export function AccountRecoveryModal({
                       disabled={loading}
                       value={identifier}
                       onChange={(e) => setIdentifier(e.target.value)}
-                      placeholder="e.g. KHHS-TCH-001, name@school.ac.ug, or 0772110401"
+                      placeholder="e.g. 001, name@school.ac.ug, or 0772110401"
                       className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                     />
                     <p className="mt-1.5 text-[11px] text-slate-500">
@@ -303,7 +303,7 @@ export function AccountRecoveryModal({
                       disabled={loading}
                       value={schoolCodeInput}
                       onChange={(e) => setSchoolCodeInput(e.target.value.toUpperCase())}
-                      placeholder="e.g. KHHS-101"
+                      placeholder="e.g. JIS-101"
                       className="w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-sm uppercase text-slate-900 placeholder:normal-case placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                     />
                   </div>
@@ -376,7 +376,7 @@ export function AccountRecoveryModal({
                   disabled={loading}
                   value={verification}
                   onChange={(e) => setVerification(e.target.value)}
-                  placeholder="e.g. 0772110401, KHHS-TCH-001, or your registered email"
+                  placeholder="e.g. 0772110401, 001, or your registered email"
                   className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm text-slate-900 focus:border-blue-800 focus:outline-none"
                 />
               </div>

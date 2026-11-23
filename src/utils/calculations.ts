@@ -15,10 +15,172 @@ import type {
   StudentProfile,
   StudentRecord,
   StudentTermHistoryPoint,
+  SubjectCombination,
   SubjectConfig,
   SubjectStudentResult,
   SubjectSummary,
 } from '../types';
+
+export function doesStudentOfferSubject(
+  student: StudentProfile,
+  subjectId: string,
+  streamClass: StreamClass,
+  combinations: SubjectCombination[] = []
+): boolean {
+  if (student.offeredSubjectIds && student.offeredSubjectIds.length > 0) {
+    return student.offeredSubjectIds.includes(subjectId);
+  }
+  if (streamClass.level === 'alevel' && student.combinationId) {
+    const combo = combinations.find((c) => c.id === student.combinationId);
+    if (combo) {
+      return (
+        combo.principalSubjectIds.includes(subjectId) ||
+        combo.subsidiarySubjectIds.includes(subjectId)
+      );
+    }
+  }
+  return streamClass.subjectIds.includes(subjectId);
+}
+
+export function filterStudentsOfferingSubject(
+  students: StudentProfile[],
+  subjectId: string,
+  streamClass: StreamClass,
+  combinations: SubjectCombination[] = []
+): StudentProfile[] {
+  return students.filter(
+    (s) =>
+      s.classId === streamClass.id &&
+      s.status === 'active' &&
+      doesStudentOfferSubject(s, subjectId, streamClass, combinations)
+  );
+}
+
+export interface MarksheetMissingBreakdown {
+  totalStudents: number;
+  completedStudents: number;
+  missingStudentsCount: number;
+  invalidCount: number;
+  missingStudentNames: string[];
+  missingByAssessment: {
+    u1: number;
+    u2: number;
+    u3: number;
+    eot: number;
+  };
+  enteredByAssessment: {
+    u1: number;
+    u2: number;
+    u3: number;
+    eot: number;
+  };
+  summaryText: string;
+}
+
+export function getMarksheetMissingBreakdown(
+  marksheet: MarksheetRecord | undefined,
+  offeringStudents: StudentProfile[],
+  level: EducationLevel,
+  subjectMaxMarks: number,
+  settings: SchoolSettings
+): MarksheetMissingBreakdown {
+  const activeStudents = offeringStudents.filter((s) => s.status === 'active');
+  const validation = validateMarksheetRecord(
+    marksheet,
+    activeStudents,
+    level,
+    subjectMaxMarks,
+    settings
+  );
+
+  const missingByAssessment = { u1: 0, u2: 0, u3: 0, eot: 0 };
+  const enteredByAssessment = { u1: 0, u2: 0, u3: 0, eot: 0 };
+  const missingNamesSet = new Set<string>();
+  const singleAoi = settings.cbcConfig.aoiInputMode === 'single_aoi';
+
+  let assessedStudentsCount = 0;
+  for (const stu of activeStudents) {
+    const entry = marksheet?.entries?.[stu.id];
+    if (entry?.exempted || entry?.missed) {
+      assessedStudentsCount += 1;
+      continue;
+    }
+
+    if (level === 'olevel') {
+      const hasU1 = Boolean((entry?.u1 ?? '').trim());
+      const hasU2 = Boolean((entry?.u2 ?? '').trim());
+      const hasU3 = Boolean((entry?.u3 ?? '').trim());
+      const hasEot = Boolean((entry?.eot ?? '').trim());
+
+      if (hasU1) enteredByAssessment.u1 += 1;
+      else missingByAssessment.u1 += 1;
+
+      if (!singleAoi) {
+        if (hasU2) enteredByAssessment.u2 += 1;
+        else missingByAssessment.u2 += 1;
+
+        if (hasU3) enteredByAssessment.u3 += 1;
+        else missingByAssessment.u3 += 1;
+      }
+
+      if (hasEot) enteredByAssessment.eot += 1;
+      else missingByAssessment.eot += 1;
+
+      const isComplete = singleAoi
+        ? hasU1 && hasEot
+        : hasU1 && hasU2 && hasU3 && hasEot;
+      if (!isComplete) {
+        missingNamesSet.add(stu.fullName);
+      } else {
+        assessedStudentsCount += 1;
+      }
+    } else {
+      const hasU1 = Boolean((entry?.u1 ?? '').trim());
+      const hasU2 = Boolean((entry?.u2 ?? '').trim());
+      const hasU3 = Boolean((entry?.u3 ?? '').trim());
+      const hasEot = Boolean((entry?.mark ?? '').trim() || (entry?.eot ?? '').trim());
+
+      if (hasU1) enteredByAssessment.u1 += 1;
+      else missingByAssessment.u1 += 1;
+      if (hasU2) enteredByAssessment.u2 += 1;
+      else missingByAssessment.u2 += 1;
+      if (hasU3) enteredByAssessment.u3 += 1;
+      else missingByAssessment.u3 += 1;
+      if (hasEot) enteredByAssessment.eot += 1;
+      else missingByAssessment.eot += 1;
+
+      if (!hasEot) {
+        missingNamesSet.add(stu.fullName);
+      } else {
+        assessedStudentsCount += 1;
+      }
+    }
+  }
+
+  // For A'Level, only flag u1/u2/u3 missing if that formative component was partially started
+  if (level === 'alevel') {
+    if (enteredByAssessment.u1 === 0) missingByAssessment.u1 = 0;
+    if (enteredByAssessment.u2 === 0) missingByAssessment.u2 = 0;
+    if (enteredByAssessment.u3 === 0) missingByAssessment.u3 = 0;
+  }
+
+  const parts: string[] = [];
+  if (missingByAssessment.u1 > 0) parts.push(`U1: ${missingByAssessment.u1} missing`);
+  if (missingByAssessment.u2 > 0) parts.push(`U2: ${missingByAssessment.u2} missing`);
+  if (missingByAssessment.u3 > 0) parts.push(`U3: ${missingByAssessment.u3} missing`);
+  if (missingByAssessment.eot > 0) parts.push(`EoT: ${missingByAssessment.eot} missing`);
+
+  return {
+    totalStudents: activeStudents.length,
+    completedStudents: assessedStudentsCount,
+    missingStudentsCount: missingNamesSet.size,
+    invalidCount: validation.invalidCount,
+    missingStudentNames: Array.from(missingNamesSet),
+    missingByAssessment,
+    enteredByAssessment,
+    summaryText: parts.join(' · '),
+  };
+}
 
 export function getGradingScaleForLevel(
   level: EducationLevel,
@@ -274,16 +436,52 @@ export function validateMarksheetRecord(
         completedCount += 1;
       }
     } else {
-      const raw = (entry?.mark ?? '').trim();
+      const alevelFormativeFields: Array<{ key: 'u1' | 'u2' | 'u3'; label: string }> = [
+        { key: 'u1', label: 'U1' },
+        { key: 'u2', label: 'U2' },
+        { key: 'u3', label: 'U3' },
+      ];
+      let studentHasInvalid = false;
+
+      for (const f of alevelFormativeFields) {
+        const rawForm = (entry?.[f.key] ?? '').trim();
+        if (!rawForm) continue;
+        const nForm = parseStrictNumber(rawForm);
+        if (nForm === null) {
+          studentHasInvalid = true;
+          invalidCount += 1;
+          issues.push({
+            studentId: stu.id,
+            admissionNo: stu.admissionNo,
+            studentName: stu.fullName,
+            field: f.label,
+            type: 'invalid_number',
+            message: `${f.label} "${rawForm}" is not a valid number.`,
+          });
+        } else if (nForm < 0 || nForm > subjectMaxMarks) {
+          studentHasInvalid = true;
+          invalidCount += 1;
+          issues.push({
+            studentId: stu.id,
+            admissionNo: stu.admissionNo,
+            studentName: stu.fullName,
+            field: f.label,
+            type: 'out_of_range',
+            message: `${f.label} (${nForm}) exceeds valid range 0–${subjectMaxMarks}.`,
+          });
+        }
+      }
+
+      const raw = (entry?.mark ?? entry?.eot ?? '').trim();
       if (!raw) {
         missingCount += 1;
         issues.push({
           studentId: stu.id,
           admissionNo: stu.admissionNo,
           studentName: stu.fullName,
-          field: 'Exam Mark',
+          field: 'EoT Mark',
           type: 'missing',
-          message: 'Missing assessment mark.',
+          message: 'Missing End of Term assessment mark.',
         });
       } else {
         const n = parseStrictNumber(raw);
@@ -293,7 +491,7 @@ export function validateMarksheetRecord(
             studentId: stu.id,
             admissionNo: stu.admissionNo,
             studentName: stu.fullName,
-            field: 'Exam Mark',
+            field: 'EoT Mark',
             type: 'invalid_number',
             message: `Mark "${raw}" is not a valid number.`,
           });
@@ -303,11 +501,11 @@ export function validateMarksheetRecord(
             studentId: stu.id,
             admissionNo: stu.admissionNo,
             studentName: stu.fullName,
-            field: 'Exam Mark',
+            field: 'EoT Mark',
             type: 'out_of_range',
             message: `Mark (${n}) exceeds valid range 0–${subjectMaxMarks}.`,
           });
-        } else {
+        } else if (!studentHasInvalid) {
           completedCount += 1;
         }
       }
@@ -373,8 +571,13 @@ export function buildExamClassView(
     const marks: Record<string, string> = {};
     const cbcMarks: Record<string, { u1: string; u2: string; u3: string; eot: string }> = {};
     entryMap[stu.id] = {};
+    const offeredSubjectIds: string[] = [];
 
     for (const sub of subjects) {
+      if (!doesStudentOfferSubject(stu, sub.id, streamClass, db.combinations)) {
+        continue;
+      }
+      offeredSubjectIds.push(sub.id);
       const ms = marksheetBySubject.get(sub.id);
       const entry = ms?.entries[stu.id];
       if (entry) {
@@ -388,7 +591,7 @@ export function buildExamClassView(
           eot: entry?.eot ?? '',
         };
       } else {
-        marks[sub.id] = entry?.mark ?? '';
+        marks[sub.id] = entry?.mark ?? entry?.eot ?? '';
       }
     }
 
@@ -402,6 +605,7 @@ export function buildExamClassView(
       gender: stu.gender,
       combinationCode: combo?.code,
       combinationName: combo?.name,
+      offeredSubjectIds,
       photoDataUrl: stu.photoDataUrl,
       marks,
       cbcMarks,
@@ -457,7 +661,16 @@ export function calculateClassPerformance(
     const failedSubjects: string[] = [];
     const validSubjectPercents: Array<{ id: string; name: string; pct: number }> = [];
 
-    for (const subject of examClass.subjects) {
+    const offeredForStudent =
+      student.offeredSubjectIds && student.offeredSubjectIds.length > 0
+        ? examClass.subjects.filter((s) => student.offeredSubjectIds!.includes(s.id))
+        : examClass.subjects;
+    const studentTotalMax =
+      level === 'olevel'
+        ? offeredForStudent.length * (cbc.formativeWeight + cbc.summativeWeight)
+        : offeredForStudent.reduce((acc, s) => acc + s.maxMarks, 0);
+
+    for (const subject of offeredForStudent) {
       const metaEntry = entryMap?.[student.id]?.[subject.id];
       const exempted = Boolean(metaEntry?.exempted);
       const missed = Boolean(metaEntry?.missed);
@@ -655,7 +868,10 @@ export function calculateClassPerformance(
       totalPoints = topPrincipals + topSubs;
     }
 
-    const totalMax = totalMaxAllSubjects;
+    const totalMax =
+      student.offeredSubjectIds && student.offeredSubjectIds.length > 0
+        ? studentTotalMax
+        : totalMaxAllSubjects;
     const percentage =
       validSubjectPercents.length > 0
         ? applyRounding(
@@ -714,7 +930,7 @@ export function calculateClassPerformance(
       totalObtained: Number(totalObtained.toFixed(1)),
       totalMax,
       assessedCount,
-      subjectCount: examClass.subjects.length,
+      subjectCount: offeredForStudent.length,
       percentage,
       grade: assessedCount > 0 ? gradeBand.grade : '—',
       gradeLabel: assessedCount > 0 ? gradeBand.label : 'Pending',
@@ -781,7 +997,7 @@ export function calculateClassPerformance(
     for (const sr of studentResults) {
       const cell = sr.subjectResults[subject.id];
       if (!cell) {
-        missingCount += 1;
+        // Student does not offer this subject (filtered by offeredSubjectIds/combination)
         continue;
       }
       if (cell.exempted) {

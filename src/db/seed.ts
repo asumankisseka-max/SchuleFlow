@@ -7,7 +7,8 @@ import {
   DEFAULT_REPORT_CARD_LAYOUT,
   INITIAL_SCHOOL_DATABASE,
 } from '../data/sampleData.ts';
-import { hashPassword } from '../lib/passwordAuth.ts';
+import { randomBytes } from 'node:crypto';
+import { hashPassword, setRuntimeSessionSecret } from '../lib/passwordAuth.ts';
 import type {
   BillingStatus,
   CurriculumScope,
@@ -32,6 +33,7 @@ import {
   gradingConfigs,
   loginActivity,
   marksheets,
+  platformRuntimeConfig,
   schools,
   staffTeachers,
   students,
@@ -83,6 +85,46 @@ function sanitizeSubdomain(raw: string): string {
     .replace(/[^a-z0-9-]/g, '')
     .replace(/^-+|-+$/g, '')
     .slice(0, 32);
+}
+
+/**
+ * Ensures a cryptographically strong HMAC session signing secret is available
+ * across all container instances without requiring manual SESSION_SECRET env setup
+ * in Cloud Run deployments. Explicit SESSION_SECRET env var always takes precedence.
+ */
+async function ensurePersistentSessionSecret(): Promise<void> {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (configured && configured.length >= 16) {
+    setRuntimeSessionSecret(configured);
+    return;
+  }
+
+  try {
+    const candidateSecret = randomBytes(48).toString('hex');
+    await db
+      .insert(platformRuntimeConfig)
+      .values({
+        key: 'session_secret',
+        value: candidateSecret,
+      })
+      .onConflictDoNothing({ target: platformRuntimeConfig.key });
+
+    const rows = await db
+      .select({ value: platformRuntimeConfig.value })
+      .from(platformRuntimeConfig)
+      .where(eq(platformRuntimeConfig.key, 'session_secret'))
+      .limit(1);
+
+    const stored = rows[0]?.value?.trim();
+    if (stored && stored.length >= 16) {
+      setRuntimeSessionSecret(stored);
+    }
+  } catch (err) {
+    console.warn(
+      'Could not load/persist platform_runtime_config session_secret; using fallback secret.',
+      err
+    );
+  }
 }
 
 /**
@@ -148,37 +190,54 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
   for (const s of schoolRows) {
     const initials = schoolInitialsById.get(s.id) ?? extractSchoolInitials(s.name);
 
-    // Backfill staff_teachers.staff_id per school starting at 001
+    // Backfill & shorten staff_teachers.staff_id per school to < 4 chars (e.g. 001, 002)
     const staffRows = (await client.unsafe(
       `SELECT id, email, staff_id FROM staff_teachers WHERE school_id = $1 ORDER BY created_at ASC, id ASC`,
       [s.id]
     )) as Array<{ id: string; email: string; staff_id: string | null }>;
 
-    const usedStaffIds = staffRows
-      .map((r) => r.staff_id)
-      .filter((v): v is string => Boolean(v && v.trim()));
+    const usedStaffIds: string[] = staffRows
+      .map((r) => r.staff_id?.trim() || '')
+      .filter((v) => /^\d{1,3}$/.test(v));
+    const usedStaffSet = new Set(usedStaffIds);
 
     for (const st of staffRows) {
       let assignedStaffId = st.staff_id?.trim() || null;
-      if (!assignedStaffId) {
-        assignedStaffId = generateNextStaffId(initials, usedStaffIds, true);
+      const legacyMatch = assignedStaffId?.match(/-TCH-(\d+)$/i);
+      const isShort = Boolean(assignedStaffId && /^\d{1,3}$/.test(assignedStaffId));
+
+      if (!assignedStaffId || legacyMatch || !isShort) {
+        let nextShort: string | null = null;
+        if (legacyMatch) {
+          const candidate = formatStaffId(initials, Number(legacyMatch[1]));
+          if (!usedStaffSet.has(candidate)) {
+            nextShort = candidate;
+          }
+        }
+        if (!nextShort) {
+          nextShort = generateNextStaffId(initials, usedStaffIds, true);
+        }
+        assignedStaffId = nextShort;
         usedStaffIds.push(assignedStaffId);
+        usedStaffSet.add(assignedStaffId);
         await client.unsafe(`UPDATE staff_teachers SET staff_id = $1 WHERE id = $2`, [
           assignedStaffId,
           st.id,
         ]);
+      } else {
+        usedStaffSet.add(assignedStaffId);
       }
 
       // Synchronize users.staff_id for matching local uid or scoped email
       await client.unsafe(
         `UPDATE users SET staff_id = $1
          WHERE (uid = $2 OR (school_id = $3 AND lower(trim(email)) = lower(trim($4))))
-           AND (staff_id IS NULL OR trim(staff_id) = '')`,
+           AND (staff_id IS NULL OR trim(staff_id) = '' OR staff_id ~* '-TCH-')`,
         [assignedStaffId, `local:${st.id}`, s.id, st.email]
       );
     }
 
-    // Backfill any school-scoped users row that does not yet have a staff_id
+    // Backfill any school-scoped users row that does not yet have a short staff_id
     const orphanUsers = (await client.unsafe(
       `SELECT id, staff_id FROM users WHERE school_id = $1 AND global_role != 'super_admin' ORDER BY id ASC`,
       [s.id]
@@ -186,13 +245,28 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
 
     const usedUserStaffIds = [
       ...usedStaffIds,
-      ...orphanUsers.map((u) => u.staff_id).filter((v): v is string => Boolean(v && v.trim())),
+      ...orphanUsers
+        .map((u) => u.staff_id?.trim() || '')
+        .filter((v) => /^\d{1,3}$/.test(v)),
     ];
+    const usedUserSet = new Set(usedUserStaffIds);
 
     for (const u of orphanUsers) {
-      if (!u.staff_id || !u.staff_id.trim()) {
-        const nextStaffId = generateNextStaffId(initials, usedUserStaffIds, true);
+      const cur = u.staff_id?.trim() || '';
+      const legacyUserMatch = cur.match(/-TCH-(\d+)$/i);
+      if (!cur || legacyUserMatch || !/^\d{1,3}$/.test(cur)) {
+        let nextStaffId: string | null = null;
+        if (legacyUserMatch) {
+          const candidate = formatStaffId(initials, Number(legacyUserMatch[1]));
+          if (!usedUserSet.has(candidate)) {
+            nextStaffId = candidate;
+          }
+        }
+        if (!nextStaffId) {
+          nextStaffId = generateNextStaffId(initials, usedUserStaffIds, true);
+        }
         usedUserStaffIds.push(nextStaffId);
+        usedUserSet.add(nextStaffId);
         await client.unsafe(`UPDATE users SET staff_id = $1 WHERE id = $2`, [nextStaffId, u.id]);
       }
     }
@@ -264,83 +338,111 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
 
 async function ensureSuperAdminSeeded(): Promise<void> {
   const targetEmail = 'superadmin@schuleflow.ac.ug';
-  const targetPassword = 'admin@schuleflow';
+  const targetUsername = 'superadmin';
+  const targetPassword = '#asu20man';
   const passwordHash = hashPassword(targetPassword);
   const envUid = `env:super_admin:${targetEmail}`;
 
-  // Check for an existing row matching the target email first
-  const existingByEmail = await db
-    .select()
-    .from(users)
-    .where(sql`lower(trim(${users.email})) = ${targetEmail}`)
-    .limit(1);
+  await db.transaction(async (tx) => {
+    // 1. Remove any stale school staff rows claiming the reserved platform Super Admin email
+    const collidingStaff = await tx
+      .select({ id: staffTeachers.id })
+      .from(staffTeachers)
+      .where(sql`lower(trim(${staffTeachers.email})) = ${targetEmail}`);
 
-  if (existingByEmail[0]) {
-    const row = existingByEmail[0];
-    const shouldRefreshHash = !row.passwordHash || row.uid.startsWith('env:super_admin:');
-    await db
-      .update(users)
-      .set({
-        email: targetEmail,
-        username: row.username || targetEmail.split('@')[0],
-        globalRole: 'super_admin',
-        schoolId: null,
-        active: true,
-        ...(shouldRefreshHash ? { passwordHash } : {}),
-      })
-      .where(eq(users.id, row.id));
-    return;
-  }
+    if (collidingStaff.length > 0) {
+      for (const st of collidingStaff) {
+        await tx.delete(users).where(eq(users.uid, `local:${st.id}`));
+        await tx.delete(staffTeachers).where(eq(staffTeachers.id, st.id));
+      }
+    }
 
-  // Migrate any legacy default-seeded super_admin row (e.g. env:super_admin:superadmin@schuleflow.ug)
-  const legacyEnvAdmins = await db
-    .select()
-    .from(users)
-    .where(sql`${users.globalRole} = 'super_admin' AND ${users.uid} LIKE 'env:super_admin:%'`);
+    // 2. Rename any school-scoped username='superadmin' so 'superadmin' resolves solely to Platform Super Admin
+    await tx.execute(sql`
+      UPDATE staff_teachers
+      SET username = username || '_' || substr(md5(id), 1, 4)
+      WHERE lower(trim(username)) = ${targetUsername}
+    `);
+    await tx.execute(sql`
+      UPDATE users
+      SET username = username || '_' || id::text
+      WHERE global_role <> 'super_admin'
+        AND lower(trim(COALESCE(username, ''))) = ${targetUsername}
+    `);
 
-  if (legacyEnvAdmins.length > 0) {
-    const primary = legacyEnvAdmins[0];
-    await db
-      .update(users)
-      .set({
+    // 3. Gather all existing candidate rows for the canonical Super Admin and deduplicate cleanly
+    const candidateRows = await tx
+      .select()
+      .from(users)
+      .where(
+        sql`lower(trim(${users.email})) = ${targetEmail}
+            OR ${users.uid} LIKE 'env:super_admin:%'
+            OR (${users.globalRole} = 'super_admin' AND lower(trim(COALESCE(${users.username}, ''))) = ${targetUsername})`
+      );
+
+    if (candidateRows.length > 0) {
+      const canonical =
+        candidateRows.find((r) => r.uid === envUid) ??
+        candidateRows.find((r) => r.globalRole === 'super_admin') ??
+        candidateRows[0];
+
+      for (const extra of candidateRows) {
+        if (extra.id !== canonical.id) {
+          await tx.delete(users).where(eq(users.id, extra.id));
+        }
+      }
+
+      await tx
+        .update(users)
+        .set({
+          uid: envUid,
+          staffId: null,
+          email: targetEmail,
+          username: targetUsername,
+          passwordHash,
+          name: 'Platform Super Admin',
+          globalRole: 'super_admin',
+          schoolId: null,
+          schoolRole: 'school_admin',
+          active: true,
+          mustChangePassword: false,
+        })
+        .where(eq(users.id, canonical.id));
+      return;
+    }
+
+    await tx
+      .insert(users)
+      .values({
         uid: envUid,
+        staffId: null,
         email: targetEmail,
-        username: targetEmail.split('@')[0],
+        username: targetUsername,
         passwordHash,
+        name: 'Platform Super Admin',
         globalRole: 'super_admin',
         schoolId: null,
+        schoolRole: 'school_admin',
         active: true,
+        mustChangePassword: false,
+        lastLogin: new Date(),
       })
-      .where(eq(users.id, primary.id));
-    return;
-  }
-
-  await db
-    .insert(users)
-    .values({
-      uid: envUid,
-      staffId: null,
-      email: targetEmail,
-      username: targetEmail.split('@')[0],
-      passwordHash,
-      name: 'Platform Super Admin',
-      globalRole: 'super_admin',
-      schoolId: null,
-      schoolRole: 'school_admin',
-      active: true,
-      lastLogin: new Date(),
-    })
-    .onConflictDoUpdate({
-      target: users.uid,
-      set: {
-        email: targetEmail,
-        username: targetEmail.split('@')[0],
-        passwordHash,
-        globalRole: 'super_admin',
-        schoolId: null,
-        active: true,
-      },
-    });
+      .onConflictDoUpdate({
+        target: users.uid,
+        set: {
+          staffId: null,
+          email: targetEmail,
+          username: targetUsername,
+          passwordHash,
+          name: 'Platform Super Admin',
+          globalRole: 'super_admin',
+          schoolId: null,
+          schoolRole: 'school_admin',
+          active: true,
+          mustChangePassword: false,
+        },
+      });
+  });
 }
 
 async function ensureSeededStaffCredentials(): Promise<void> {
@@ -362,6 +464,7 @@ async function ensureSeededStaffCredentials(): Promise<void> {
   const defaultHash = hashPassword('password123');
   for (const st of allStaff) {
     const cleanEmail = st.email.trim().toLowerCase();
+    if (cleanEmail === 'superadmin@schuleflow.ac.ug') continue;
     const cleanUser = st.username.trim().toLowerCase() || cleanEmail.split('@')[0];
     const normRole = normalizeUserRole(st.role);
     const normPhone = normalizeStoredPhone(st.phone);
@@ -389,7 +492,12 @@ async function ensureSeededStaffCredentials(): Promise<void> {
     }
 
     const existingUsers = await db
-      .select({ id: users.id, phone: users.phone, staffId: users.staffId })
+      .select({
+        id: users.id,
+        phone: users.phone,
+        staffId: users.staffId,
+        passwordHash: users.passwordHash,
+      })
       .from(users)
       .where(eq(users.uid, `local:${st.id}`))
       .limit(1);
@@ -411,12 +519,17 @@ async function ensureSeededStaffCredentials(): Promise<void> {
           active: st.active,
         })
         .onConflictDoNothing();
-    } else if ((!existingUsers[0].phone && normPhone) || existingUsers[0].staffId !== assignedStaffId) {
+    } else if (
+      (!existingUsers[0].phone && normPhone) ||
+      existingUsers[0].staffId !== assignedStaffId ||
+      !existingUsers[0].passwordHash
+    ) {
       await db
         .update(users)
         .set({
           ...(!existingUsers[0].phone && normPhone ? { phone: normPhone } : {}),
           ...(assignedStaffId ? { staffId: assignedStaffId } : {}),
+          ...(!existingUsers[0].passwordHash ? { passwordHash: st.passwordHash ?? defaultHash } : {}),
         })
         .where(eq(users.id, existingUsers[0].id));
     }
@@ -428,12 +541,12 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
     seedPromise = (async () => {
       try {
         await ensureReachableDbConnection();
+        await ensurePersistentSessionSecret();
         await ensureSchemaColumnsAndBackfill();
 
         const existing = await db.select({ id: schools.id }).from(schools).limit(1);
         if (existing.length === 0) {
-          await seedKampalaHorizon();
-          await seedStMarysMbale();
+          await seedJanguInternational();
         }
 
         await ensureSuperAdminSeeded();
@@ -458,8 +571,8 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
   return seedPromise;
 }
 
-async function seedKampalaHorizon() {
-  const schoolId = 'sch-kampala-horizon';
+async function seedJanguInternational() {
+  const schoolId = 'sch-jangu-international';
   const base = INITIAL_SCHOOL_DATABASE;
   const initials = extractSchoolInitials(base.settings.schoolName);
 
@@ -468,7 +581,7 @@ async function seedKampalaHorizon() {
       id: schoolId,
       schoolCode: `${initials}-101`,
       name: base.settings.schoolName,
-      subdomain: 'kampalahorizon',
+      subdomain: 'janguinternational',
       motto: base.settings.reportLayout.schoolMotto,
       logoUrl: null,
       primaryColor: '#1e3a8a',
@@ -659,404 +772,6 @@ async function seedKampalaHorizon() {
   });
 }
 
-async function seedStMarysMbale() {
-  const schoolId = 'sch-stmarys-mbale';
-  const schoolName = "St. Mary's College Mbale";
-  const initials = extractSchoolInitials(schoolName);
-
-  await db.transaction(async (tx) => {
-    await tx.insert(schools).values({
-      id: schoolId,
-      schoolCode: `${initials}-102`,
-      name: schoolName,
-      subdomain: 'stmarysmbale',
-      motto: 'Disciplina, Scientia et Fides',
-      logoUrl: null,
-      primaryColor: '#065f46',
-      secondaryColor: '#d97706',
-      address: 'P.O. Box 412 Mbale · Republic Street, Eastern Region',
-      phone: '+256 454 433 210',
-      email: 'dos@stmarysmbale.ac.ug',
-      district: 'Mbale',
-      region: 'Eastern',
-      status: 'trial',
-      plan: 'starter',
-      studentQuota: 150,
-      termFeePerStudentUgx: 5000,
-      billingStatus: 'pending',
-      nextBillingDate: '2026-12-15',
-      academicYear: '2026',
-      termName: 'Term III',
-      principalName: 'Sr. Beatrice Nabwire',
-      dosName: 'Mr. Moses Wanyama',
-      reportsGeneratedCount: 14,
-    });
-
-    await tx.insert(gradingConfigs).values({
-      id: `gc-${schoolId}`,
-      schoolId,
-      cbcConfig: {
-        ...DEFAULT_CBC_CONFIG,
-        roundingMode: 'one_decimal',
-      },
-      alevelPolicy: DEFAULT_ALEVEL_POLICY,
-      olevelGradingScale: DEFAULT_OLEVEL_GRADING_SCALE,
-      alevelGradingScale: DEFAULT_ALEVEL_GRADING_SCALE,
-      reportLayout: {
-        ...DEFAULT_REPORT_CARD_LAYOUT,
-        style: 'modern',
-        accentColor: 'emerald',
-        crestType: 'award',
-        schoolMotto: 'Disciplina, Scientia et Fides',
-        schoolContact: 'P.O. Box 412 Mbale · Republic Street · +256 454 433 210',
-        reportTitle: 'Terminal Assessment Transcript',
-      },
-    });
-
-    await tx.insert(staffTeachers).values([
-      {
-        id: `${schoolId}:usr-admin`,
-        schoolId,
-        staffId: formatStaffId(initials, 1),
-        name: 'Mr. Stephen Wandera',
-        email: 'admin@stmarysmbale.ac.ug',
-        username: 'wandera',
-        role: 'school_admin',
-        active: true,
-        phone: '+256772801412',
-        assignedClassIds: [],
-        assignedSubjectIds: [],
-      },
-      {
-        id: `${schoolId}:usr-dos`,
-        schoolId,
-        staffId: formatStaffId(initials, 2),
-        name: 'Mr. Moses Wanyama',
-        email: 'dos@stmarysmbale.ac.ug',
-        username: 'wanyama',
-        role: 'dos',
-        active: true,
-        phone: '+256701512889',
-        assignedClassIds: [`${schoolId}:cls-s1-north`, `${schoolId}:cls-s5-hum`],
-        assignedSubjectIds: [],
-      },
-      {
-        id: `${schoolId}:usr-teacher-1`,
-        schoolId,
-        staffId: formatStaffId(initials, 3),
-        name: 'Ms. Sarah Nandutu',
-        email: 'snandutu@stmarysmbale.ac.ug',
-        username: 'nandutu',
-        role: 'teacher',
-        active: true,
-        phone: '+256782440211',
-        assignedClassIds: [`${schoolId}:cls-s1-north`, `${schoolId}:cls-s5-hum`],
-        assignedSubjectIds: [
-          `${schoolId}:sub-math`,
-          `${schoolId}:sub-engl`,
-          `${schoolId}:sub-econ`,
-        ],
-      },
-    ]);
-
-    await tx.insert(subjects).values([
-      {
-        id: `${schoolId}:sub-math`,
-        schoolId,
-        code: 'MATH',
-        name: 'Mathematics',
-        level: 'olevel',
-        category: 'compulsory',
-        maxMarks: 100,
-        passMark: 50,
-        competencies: ['Solves numerical, algebraic and geometric problems accurately'],
-      },
-      {
-        id: `${schoolId}:sub-engl`,
-        schoolId,
-        code: 'ENGL',
-        name: 'English Language',
-        level: 'olevel',
-        category: 'compulsory',
-        maxMarks: 100,
-        passMark: 50,
-        competencies: ['Writes structured essays and analyses formal comprehension texts'],
-      },
-      {
-        id: `${schoolId}:sub-chem`,
-        schoolId,
-        code: 'CHEM',
-        name: 'Chemistry',
-        level: 'olevel',
-        category: 'compulsory',
-        maxMarks: 100,
-        passMark: 50,
-        competencies: ['Demonstrates safe laboratory measurement and reaction analysis'],
-      },
-      {
-        id: `${schoolId}:sub-hist`,
-        schoolId,
-        code: 'P210',
-        name: 'History',
-        level: 'alevel',
-        category: 'principal',
-        maxMarks: 100,
-        passMark: 45,
-        competencies: ['East African & World Constitutional History'],
-      },
-      {
-        id: `${schoolId}:sub-econ`,
-        schoolId,
-        code: 'P220',
-        name: 'Economics',
-        level: 'alevel',
-        category: 'principal',
-        maxMarks: 100,
-        passMark: 45,
-        competencies: ['Price Theory, Monetary Policy & Economic Growth'],
-      },
-      {
-        id: `${schoolId}:sub-div`,
-        schoolId,
-        code: 'P245',
-        name: 'Divinity',
-        level: 'alevel',
-        category: 'principal',
-        maxMarks: 100,
-        passMark: 45,
-        competencies: ['Old & New Testament Contextual Analysis'],
-      },
-      {
-        id: `${schoolId}:sub-gp`,
-        schoolId,
-        code: 'S101',
-        name: 'General Paper',
-        level: 'alevel',
-        category: 'subsidiary',
-        maxMarks: 100,
-        passMark: 50,
-        competencies: ['Critical Logic & Contemporary Essays'],
-      },
-    ]);
-
-    await tx.insert(subjectCombinations).values([
-      {
-        id: `${schoolId}:comb-hed`,
-        schoolId,
-        code: 'HED/GP',
-        name: 'History, Economics, Divinity + General Paper',
-        principalSubjectIds: [
-          `${schoolId}:sub-hist`,
-          `${schoolId}:sub-econ`,
-          `${schoolId}:sub-div`,
-        ],
-        subsidiarySubjectIds: [`${schoolId}:sub-gp`],
-      },
-    ]);
-
-    await tx.insert(classesStreams).values([
-      {
-        id: `${schoolId}:cls-s1-north`,
-        schoolId,
-        name: 'S.1 North',
-        gradeLevel: 'S.1',
-        stream: 'North',
-        level: 'olevel',
-        classTeacherId: `${schoolId}:usr-teacher-1`,
-        subjectIds: [
-          `${schoolId}:sub-math`,
-          `${schoolId}:sub-engl`,
-          `${schoolId}:sub-chem`,
-        ],
-        subjectTeacherMap: {
-          [`${schoolId}:sub-math`]: `${schoolId}:usr-teacher-1`,
-          [`${schoolId}:sub-engl`]: `${schoolId}:usr-teacher-1`,
-          [`${schoolId}:sub-chem`]: `${schoolId}:usr-dos`,
-        },
-      },
-      {
-        id: `${schoolId}:cls-s5-hum`,
-        schoolId,
-        name: 'S.5 Humanities',
-        gradeLevel: 'S.5',
-        stream: 'Humanities',
-        level: 'alevel',
-        classTeacherId: `${schoolId}:usr-dos`,
-        subjectIds: [
-          `${schoolId}:sub-hist`,
-          `${schoolId}:sub-econ`,
-          `${schoolId}:sub-div`,
-          `${schoolId}:sub-gp`,
-        ],
-        subjectTeacherMap: {
-          [`${schoolId}:sub-hist`]: `${schoolId}:usr-dos`,
-          [`${schoolId}:sub-econ`]: `${schoolId}:usr-teacher-1`,
-          [`${schoolId}:sub-div`]: `${schoolId}:usr-dos`,
-          [`${schoolId}:sub-gp`]: `${schoolId}:usr-teacher-1`,
-        },
-      },
-    ]);
-
-    const mbaleStudents = [
-      {
-        id: `${schoolId}:stu-1`,
-        admissionNo: 'SMCM/26/101',
-        fullName: 'Wambwa Derrick',
-        gender: 'M',
-        classId: `${schoolId}:cls-s1-north`,
-        combinationId: null,
-      },
-      {
-        id: `${schoolId}:stu-2`,
-        admissionNo: 'SMCM/26/102',
-        fullName: 'Namono Juliet',
-        gender: 'F',
-        classId: `${schoolId}:cls-s1-north`,
-        combinationId: null,
-      },
-      {
-        id: `${schoolId}:stu-3`,
-        admissionNo: 'SMCM/26/103',
-        fullName: 'Masaba Timothy',
-        gender: 'M',
-        classId: `${schoolId}:cls-s1-north`,
-        combinationId: null,
-      },
-      {
-        id: `${schoolId}:stu-4`,
-        admissionNo: 'SMCM/26/104',
-        fullName: 'Nandudu Esther',
-        gender: 'F',
-        classId: `${schoolId}:cls-s1-north`,
-        combinationId: null,
-      },
-      {
-        id: `${schoolId}:stu-5`,
-        admissionNo: 'SMCM/26/501',
-        fullName: 'Kakai Priscilla',
-        gender: 'F',
-        classId: `${schoolId}:cls-s5-hum`,
-        combinationId: `${schoolId}:comb-hed`,
-      },
-      {
-        id: `${schoolId}:stu-6`,
-        admissionNo: 'SMCM/26/502',
-        fullName: 'Wabwire Joel',
-        gender: 'M',
-        classId: `${schoolId}:cls-s5-hum`,
-        combinationId: `${schoolId}:comb-hed`,
-      },
-    ];
-
-    await tx.insert(students).values(
-      mbaleStudents.map((s, idx) => ({
-        ...s,
-        studentId: formatStudentId(initials, idx + 1),
-        schoolId,
-        academicYear: '2026',
-        status: 'active',
-      }))
-    );
-
-    const examId = `${schoolId}:exam-2026-t3`;
-    await tx.insert(examinations).values([
-      {
-        id: examId,
-        schoolId,
-        name: 'Term III End of Term',
-        examType: 'End of Term',
-        term: 'Term III',
-        academicYear: '2026',
-        levelScope: 'all',
-        classIds: [`${schoolId}:cls-s1-north`, `${schoolId}:cls-s5-hum`],
-        examDate: '2026-11-12',
-        submissionDeadline: '2026-11-22',
-        locked: false,
-        published: false,
-        createdAt: '2026-11-01T08:00:00Z',
-      },
-    ]);
-
-    await tx.insert(marksheets).values([
-      {
-        id: `${schoolId}:ms-1`,
-        schoolId,
-        examId,
-        classId: `${schoolId}:cls-s1-north`,
-        subjectId: `${schoolId}:sub-math`,
-        teacherId: `${schoolId}:usr-teacher-1`,
-        status: 'approved',
-        entries: {
-          [`${schoolId}:stu-1`]: { u1: '2.7', u2: '2.8', u3: '2.9', eot: '88' },
-          [`${schoolId}:stu-2`]: { u1: '2.5', u2: '2.4', u3: '2.6', eot: '79' },
-          [`${schoolId}:stu-3`]: { u1: '2.1', u2: '2.0', u3: '2.2', eot: '64' },
-          [`${schoolId}:stu-4`]: { u1: '2.8', u2: '2.9', u3: '2.7', eot: '91' },
-        },
-        submittedAt: '2026-11-13T09:00:00Z',
-        submittedBy: `${schoolId}:usr-teacher-1`,
-        approvedAt: '2026-11-13T14:00:00Z',
-        approvedBy: `${schoolId}:usr-dos`,
-        lastModified: '2026-11-13T14:00:00Z',
-        auditHistory: [],
-      },
-      {
-        id: `${schoolId}:ms-2`,
-        schoolId,
-        examId,
-        classId: `${schoolId}:cls-s1-north`,
-        subjectId: `${schoolId}:sub-engl`,
-        teacherId: `${schoolId}:usr-teacher-1`,
-        status: 'submitted',
-        entries: {
-          [`${schoolId}:stu-1`]: { u1: '2.4', u2: '2.5', u3: '2.6', eot: '81' },
-          [`${schoolId}:stu-2`]: { u1: '2.7', u2: '2.8', u3: '2.7', eot: '86' },
-          [`${schoolId}:stu-3`]: { u1: '1.9', u2: '2.1', u3: '2.0', eot: '61' },
-          [`${schoolId}:stu-4`]: { u1: '2.6', u2: '2.7', u3: '2.8', eot: '84' },
-        },
-        submittedAt: '2026-11-13T10:30:00Z',
-        submittedBy: `${schoolId}:usr-teacher-1`,
-        lastModified: '2026-11-13T10:30:00Z',
-        auditHistory: [],
-      },
-      {
-        id: `${schoolId}:ms-3`,
-        schoolId,
-        examId,
-        classId: `${schoolId}:cls-s5-hum`,
-        subjectId: `${schoolId}:sub-econ`,
-        teacherId: `${schoolId}:usr-teacher-1`,
-        status: 'approved',
-        entries: {
-          [`${schoolId}:stu-5`]: { mark: '82' },
-          [`${schoolId}:stu-6`]: { mark: '74' },
-        },
-        submittedAt: '2026-11-13T11:00:00Z',
-        submittedBy: `${schoolId}:usr-teacher-1`,
-        approvedAt: '2026-11-13T16:00:00Z',
-        approvedBy: `${schoolId}:usr-dos`,
-        lastModified: '2026-11-13T16:00:00Z',
-        auditHistory: [],
-      },
-    ]);
-
-    await tx.insert(subscriptionInvoices).values([
-      {
-        id: `inv-${schoolId}-2026-t3`,
-        schoolId,
-        termName: 'Term III',
-        academicYear: '2026',
-        activeStudentsCount: mbaleStudents.length,
-        licensedQuota: 150,
-        unitFeeUgx: 5000,
-        totalAmountUgx: mbaleStudents.length * 5000,
-        status: 'pending',
-        issuedAt: '2026-11-01',
-        paidAt: null,
-      },
-    ]);
-  });
-}
-
 export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promise<SchoolTenant> {
   const cleanSub = sanitizeSubdomain(input.subdomain || input.name);
   if (!cleanSub) {
@@ -1237,6 +952,9 @@ export async function provisionNewSchoolTenant(input: OnboardSchoolInput): Promi
   const adminEmailClean = input.adminEmail.trim().toLowerCase();
   const adminUsernameClean =
     (input.adminUsername?.trim() || adminEmailClean.split('@')[0] || 'schooladmin').toLowerCase();
+  if (adminEmailClean === 'superadmin@schuleflow.ac.ug' || adminUsernameClean === 'superadmin') {
+    throw new Error('superadmin@schuleflow.ac.ug and username "superadmin" are reserved for the Platform Super Admin.');
+  }
   const schoolPhoneClean = normalizeStoredPhone(input.phone) ?? (input.phone.trim() || '+256700000000');
   const adminPhoneClean = normalizeStoredPhone(input.adminPhone) ?? schoolPhoneClean;
   const adminUsedDefaultPwd = !input.adminPassword?.trim();

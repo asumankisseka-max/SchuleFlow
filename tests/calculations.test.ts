@@ -12,6 +12,8 @@ import {
   applyRounding,
   calculateClassPerformance,
   computeCbcIdentifier,
+  filterStudentsOfferingSubject,
+  getMarksheetMissingBreakdown,
   resolveGrade,
   validateMarksheetRecord,
 } from '../src/utils/calculations.ts';
@@ -283,5 +285,184 @@ describe('Uganda O-Level CBC & A-Level UACE Calculation Engine', () => {
     assert.equal(summary.isReadyForSubmission, false);
     assert.equal(summary.invalidCount, 1);
     assert.equal(summary.missingCount, 1);
+  });
+
+  it('filters students strictly by subject offerings & A-Level combinations and computes missing marks breakdown', () => {
+    const settings = makeSettings();
+    const olevelClass = {
+      id: 'cls-s2',
+      name: 'S.2 East',
+      gradeLevel: 'S.2',
+      level: 'olevel' as const,
+      classTeacherId: 't1',
+      subjectIds: ['sub-math', 'sub-geo'],
+      subjectTeacherMap: {},
+    };
+    const alevelClass = {
+      id: 'cls-s5',
+      name: 'S.5 Science',
+      gradeLevel: 'S.5',
+      level: 'alevel' as const,
+      classTeacherId: 't1',
+      subjectIds: ['sub-a-math', 'sub-a-bio'],
+      subjectTeacherMap: {},
+    };
+    const combinations = [
+      {
+        id: 'comb-pcm',
+        code: 'PCM/ICT',
+        name: 'Physics Chemistry Mathematics',
+        principalSubjectIds: ['sub-a-math'],
+        subsidiarySubjectIds: [],
+      },
+      {
+        id: 'comb-bcm',
+        code: 'BCM/ICT',
+        name: 'Biology Chemistry Mathematics',
+        principalSubjectIds: ['sub-a-bio'],
+        subsidiarySubjectIds: [],
+      },
+    ];
+    const students = [
+      {
+        id: 'stu-1',
+        admissionNo: 'S1',
+        fullName: 'Grace Namukasa',
+        gender: 'F' as const,
+        classId: 'cls-s2',
+        academicYear: '2026',
+        status: 'active' as const,
+        offeredSubjectIds: ['sub-math'], // drops sub-geo
+      },
+      {
+        id: 'stu-2',
+        admissionNo: 'S2',
+        fullName: 'Peter Okello',
+        gender: 'M' as const,
+        classId: 'cls-s2',
+        academicYear: '2026',
+        status: 'active' as const,
+      },
+      {
+        id: 'stu-3',
+        admissionNo: 'S3',
+        fullName: 'A-Level Math Student',
+        gender: 'M' as const,
+        classId: 'cls-s5',
+        academicYear: '2026',
+        status: 'active' as const,
+        combinationId: 'comb-pcm',
+      },
+      {
+        id: 'stu-4',
+        admissionNo: 'S4',
+        fullName: 'A-Level Bio Student',
+        gender: 'F' as const,
+        classId: 'cls-s5',
+        academicYear: '2026',
+        status: 'active' as const,
+        combinationId: 'comb-bcm',
+      },
+    ];
+
+    const geoStudents = filterStudentsOfferingSubject(students, 'sub-geo', olevelClass, combinations);
+    assert.deepEqual(
+      geoStudents.map((s) => s.id),
+      ['stu-2']
+    );
+
+    const aMathStudents = filterStudentsOfferingSubject(
+      students,
+      'sub-a-math',
+      alevelClass,
+      combinations
+    );
+    assert.deepEqual(
+      aMathStudents.map((s) => s.id),
+      ['stu-3']
+    );
+
+    // Partial U1-only marksheet triggers missing breakdown for U2, U3, EoT
+    const mathStudents = filterStudentsOfferingSubject(students, 'sub-math', olevelClass, combinations);
+    const partialBreakdown = getMarksheetMissingBreakdown(
+      {
+        id: 'ms-partial',
+        examId: 'ex-1',
+        classId: 'cls-s2',
+        subjectId: 'sub-math',
+        teacherId: 't1',
+        status: 'submitted',
+        entries: {
+          'stu-1': { u1: '2.5' },
+          'stu-2': { u1: '3', u2: '2.5', u3: '2.8', eot: '78' },
+        },
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+      mathStudents,
+      'olevel',
+      100,
+      settings
+    );
+
+    assert.equal(partialBreakdown.totalStudents, 2);
+    assert.equal(partialBreakdown.completedStudents, 1);
+    assert.equal(partialBreakdown.missingStudentsCount, 1);
+    assert.deepEqual(partialBreakdown.missingStudentNames, ['Grace Namukasa']);
+    assert.equal(partialBreakdown.missingByAssessment.u1, 0);
+    assert.equal(partialBreakdown.missingByAssessment.u2, 1);
+    assert.equal(partialBreakdown.missingByAssessment.u3, 1);
+    assert.equal(partialBreakdown.missingByAssessment.eot, 1);
+    assert.ok(partialBreakdown.summaryText.includes('U2: 1 missing'));
+  });
+
+  it('validates A-Level U1/U2/U3 scores within maxMarks while permitting partial U1-only sheets', () => {
+    const settings = makeSettings();
+    const students = [
+      {
+        id: 'stu-al1',
+        admissionNo: 'AL-1',
+        fullName: 'Kato Brian',
+        gender: 'M' as const,
+        classId: 'cls-s5',
+        academicYear: '2026',
+        status: 'active' as const,
+      },
+      {
+        id: 'stu-al2',
+        admissionNo: 'AL-2',
+        fullName: 'Namono Sarah',
+        gender: 'F' as const,
+        classId: 'cls-s5',
+        academicYear: '2026',
+        status: 'active' as const,
+      },
+    ];
+
+    const summary = validateMarksheetRecord(
+      {
+        id: 'ms-alevel',
+        examId: 'ex-1',
+        classId: 'cls-s5',
+        subjectId: 'sub-phy',
+        teacherId: 't1',
+        status: 'draft',
+        entries: {
+          'stu-al1': { u1: '78' }, // Valid U1-only entry; missing EoT flagged without invalidCount
+          'stu-al2': { u1: '112', eot: '84' }, // Out-of-range U1 > 100
+        },
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+      students,
+      'alevel',
+      100,
+      settings
+    );
+
+    assert.equal(summary.invalidCount, 1);
+    assert.equal(summary.missingCount, 1);
+    assert.equal(summary.issues.some((i) => i.studentId === 'stu-al2' && i.field === 'U1' && i.type === 'out_of_range'), true);
+    assert.equal(summary.issues.some((i) => i.studentId === 'stu-al1' && i.field === 'EoT Mark' && i.type === 'missing'), true);
   });
 });

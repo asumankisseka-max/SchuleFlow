@@ -127,7 +127,7 @@ export const staffTeachers = pgTable(
     schoolId: text('school_id')
       .notNull()
       .references(() => schools.id, { onDelete: 'cascade' }),
-    staffId: text('staff_id'), // e.g., 'KHS-TCH-001' (unique per school)
+    staffId: text('staff_id'), // e.g., '001' (short < 4 char ID, unique per school)
     name: text('name').notNull(),
     email: text('email').notNull(),
     username: text('username').notNull(),
@@ -229,6 +229,7 @@ export const students = pgTable(
     academicYear: text('academic_year').notNull(),
     status: text('status').notNull().default('active'), // 'active' | 'transferred' | 'inactive'
     combinationId: text('combination_id'),
+    offeredSubjectIds: jsonb('offered_subject_ids').$type<string[] | null>(),
     parentName: text('parent_name'),
     parentContact: text('parent_contact'),
     photoDataUrl: text('photo_data_url'),
@@ -317,6 +318,40 @@ export const studentRemarks = pgTable(
   (table) => [index('remarks_school_idx').on(table.schoolId)]
 );
 
+export const marksheetCorrectionRequests = pgTable(
+  'marksheet_correction_requests',
+  {
+    id: text('id').primaryKey(),
+    schoolId: text('school_id')
+      .notNull()
+      .references(() => schools.id, { onDelete: 'cascade' }),
+    marksheetId: text('marksheet_id').notNull(),
+    examId: text('exam_id').notNull(),
+    classId: text('class_id').notNull(),
+    subjectId: text('subject_id').notNull(),
+    assessmentScope: text('assessment_scope').notNull().default('all'),
+    requestedByUserId: text('requested_by_user_id').notNull(),
+    requestedByName: text('requested_by_name').notNull(),
+    requestedByStaffId: text('requested_by_staff_id'),
+    reason: text('reason').notNull(),
+    status: text('status').notNull().default('pending'),
+    reviewedByUserId: text('reviewed_by_user_id'),
+    reviewedByName: text('reviewed_by_name'),
+    reviewNote: text('review_note'),
+    createdAt: text('created_at').notNull(),
+    reviewedAt: text('reviewed_at'),
+  },
+  (table) => [
+    index('correction_req_school_idx').on(table.schoolId),
+    index('correction_req_lookup_idx').on(
+      table.schoolId,
+      table.examId,
+      table.classId,
+      table.subjectId
+    ),
+  ]
+);
+
 /* -------------------------------------------------------------------------- */
 /* 9. Subscription Billing & Tenant Activity Logs                             */
 /* -------------------------------------------------------------------------- */
@@ -376,6 +411,15 @@ export const auditLogs = pgTable(
     index('audit_logs_school_idx').on(table.schoolId),
   ]
 );
+
+/* -------------------------------------------------------------------------- */
+/* 11. Platform Runtime Configuration (e.g., Cloud Run HMAC Signing Secret)   */
+/* -------------------------------------------------------------------------- */
+export const platformRuntimeConfig = pgTable('platform_runtime_config', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
 
 /* -------------------------------------------------------------------------- */
 /* Drizzle Relations                                                          */

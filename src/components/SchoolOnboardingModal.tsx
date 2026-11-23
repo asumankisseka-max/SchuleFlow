@@ -276,9 +276,10 @@ export function SchoolOnboardingModal({
             </div>
 
             <p className="text-[11px] text-slate-500 leading-relaxed">
-              Schools are kept strictly private and never appear in public login dropdowns. Staff
-              must enter <strong>{provisionedSchool.schoolCode}</strong> together with their Staff ID
-              or email and personal password to access this workspace.
+              Schools remain strictly private. Staff first enter School ID{' '}
+              <strong>{provisionedSchool.schoolCode}</strong>, then their short Staff ID (e.g.{' '}
+              <strong>{provisionedSchool.adminStaffId ?? '001'}</strong>) and personal password to
+              access this workspace.
             </p>
 
             <div className="flex justify-end pt-2 border-t border-slate-200">

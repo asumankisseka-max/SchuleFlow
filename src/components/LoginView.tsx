@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   ArrowRight,
   BookOpenCheck,
+  Building2,
   Eye,
   EyeOff,
   KeyRound,
@@ -28,6 +29,8 @@ interface LoginViewProps {
   onCredentialSignIn: (params: CredentialSignInParams) => Promise<boolean>;
 }
 
+type LoginStep = 'school' | 'identifier' | 'password';
+
 export function LoginView({
   loading,
   error,
@@ -37,25 +40,31 @@ export function LoginView({
   onRemoveRecentAccount,
   onCredentialSignIn,
 }: LoginViewProps) {
-  const [step, setStep] = useState<'identifier' | 'password'>('identifier');
-  const [schoolCode, setSchoolCode] = useState(() => {
+  const [initialUrlCode] = useState(() => {
     if (typeof window === 'undefined') return '';
     const params = new URLSearchParams(window.location.search);
     return (params.get('code') || '').trim().toUpperCase();
   });
+
+  const [step, setStep] = useState<LoginStep>(initialUrlCode ? 'identifier' : 'school');
+  const [schoolInput, setSchoolInput] = useState(initialUrlCode);
+  const [schoolCode, setSchoolCode] = useState(initialUrlCode);
   const [disambiguateSchoolCode, setDisambiguateSchoolCode] = useState(false);
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [rememberMe, setRememberMe] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [lookingUpSchool, setLookingUpSchool] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
 
   const [urlSchoolBranding, setUrlSchoolBranding] = useState<PublicSchoolBranding | null>(null);
 
+  const schoolInputRef = useRef<HTMLInputElement | null>(null);
   const identifierInputRef = useRef<HTMLInputElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Optional branding only when opened via an explicit ?code=SCHOOL-101 link
+  // Hydrate branding automatically when opened via ?code=SCHOOL-101 or picking a saved school account
   useEffect(() => {
     const trimmed = schoolCode.trim().toUpperCase();
     if (!trimmed || disambiguateSchoolCode) return;
@@ -66,15 +75,20 @@ export function LoginView({
         if (active) setUrlSchoolBranding(res.school);
       })
       .catch(() => {
-        if (active) setUrlSchoolBranding(null);
+        if (active) {
+          setUrlSchoolBranding(null);
+          if (initialUrlCode && trimmed === initialUrlCode) {
+            setSchoolCode('');
+            setStep('school');
+          }
+        }
       });
     return () => {
       active = false;
     };
-  }, [schoolCode, disambiguateSchoolCode]);
+  }, [schoolCode, disambiguateSchoolCode, initialUrlCode]);
 
-  // If the backend detects the same credentials exist in multiple workspaces after password check,
-  // switch to School Code disambiguation without ever enumerating before password verification.
+  // If the backend requires School ID (e.g. shared email across schools), prompt cleanly at password step
   useEffect(() => {
     if (errorCode === 'SCHOOL_CODE_REQUIRED') {
       setDisambiguateSchoolCode(true);
@@ -90,38 +104,114 @@ export function LoginView({
     [urlSchoolBranding]
   );
 
+  const displayError = localError || error;
+  const isBusy = loading || lookingUpSchool;
+
+  const handleSchoolStepContinue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const raw = schoolInput.trim();
+    if (!raw) return;
+
+    onClearError();
+    setLocalError(null);
+    setDisambiguateSchoolCode(false);
+
+    // Email input or superadmin username advances straight to password without enumerating
+    if (raw.includes('@') || raw.toLowerCase() === 'superadmin') {
+      setSchoolCode('');
+      setUrlSchoolBranding(null);
+      setIdentifier(raw.toLowerCase());
+      setPassword('');
+      setStep('password');
+      requestAnimationFrame(() => passwordInputRef.current?.focus());
+      return;
+    }
+
+    const candidateCode = raw.toUpperCase();
+    setLookingUpSchool(true);
+    try {
+      const res = await platformApi.lookupSchoolByCode(candidateCode);
+      setSchoolCode(res.school.schoolCode);
+      setSchoolInput(res.school.schoolCode);
+      setUrlSchoolBranding(res.school);
+      setIdentifier('');
+      setPassword('');
+      setStep('identifier');
+      requestAnimationFrame(() => identifierInputRef.current?.focus());
+    } catch (err: unknown) {
+      setUrlSchoolBranding(null);
+      setSchoolCode('');
+      setLocalError(
+        err instanceof Error ? err.message : 'No registered school matches that School ID.'
+      );
+    } finally {
+      setLookingUpSchool(false);
+    }
+  };
+
   const handleIdentifierContinue = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!identifier.trim()) return;
+    const cleanId = identifier.trim();
+    if (!cleanId) return;
     onClearError();
+    setLocalError(null);
+    if (
+      cleanId.toLowerCase() === 'superadmin@schuleflow.ac.ug' ||
+      cleanId.toLowerCase() === 'superadmin'
+    ) {
+      setSchoolCode('');
+      setUrlSchoolBranding(null);
+      setDisambiguateSchoolCode(false);
+      setIdentifier(cleanId.toLowerCase());
+    }
+    setPassword('');
     setStep('password');
-    requestAnimationFrame(() => {
-      passwordInputRef.current?.focus();
-    });
+    requestAnimationFrame(() => passwordInputRef.current?.focus());
+  };
+
+  const handleChangeSchool = () => {
+    onClearError();
+    setLocalError(null);
+    setPassword('');
+    setIdentifier('');
+    setSchoolCode('');
+    setUrlSchoolBranding(null);
+    setDisambiguateSchoolCode(false);
+    setStep('school');
+    requestAnimationFrame(() => schoolInputRef.current?.focus());
   };
 
   const handleChangeIdentifier = () => {
     onClearError();
+    setLocalError(null);
     setPassword('');
-    setSchoolCode('');
-    setUrlSchoolBranding(null);
     setDisambiguateSchoolCode(false);
-    setStep('identifier');
-    requestAnimationFrame(() => {
-      identifierInputRef.current?.focus();
-    });
+    if (schoolCode.trim()) {
+      setStep('identifier');
+      requestAnimationFrame(() => identifierInputRef.current?.focus());
+    } else {
+      setSchoolCode('');
+      setUrlSchoolBranding(null);
+      setStep('school');
+      requestAnimationFrame(() => schoolInputRef.current?.focus());
+    }
   };
 
   const handlePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!identifier.trim() || !password) return;
+    const cleanId = identifier.trim();
+    if (!cleanId || !password) return;
     if (disambiguateSchoolCode && !schoolCode.trim()) return;
 
+    setLocalError(null);
+    const isSuperAdminId =
+      cleanId.toLowerCase() === 'superadmin@schuleflow.ac.ug' ||
+      cleanId.toLowerCase() === 'superadmin';
+    const activeCode = isSuperAdminId ? '' : schoolCode.trim().toUpperCase();
+
     await onCredentialSignIn({
-      ...(disambiguateSchoolCode && schoolCode.trim()
-        ? { schoolCode: schoolCode.trim().toUpperCase() }
-        : {}),
-      identifier: identifier.trim(),
+      ...(activeCode ? { schoolCode: activeCode } : {}),
+      identifier: cleanId,
       password,
       rememberMe,
     });
@@ -129,15 +219,31 @@ export function LoginView({
 
   const handlePickRecentAccount = (account: RememberedAccountHint) => {
     onClearError();
-    setIdentifier(account.identifier);
-    setSchoolCode('');
+    setLocalError(null);
     setDisambiguateSchoolCode(false);
+    const preferredCode = account.mode === 'school' ? (account.schoolCode ?? '') : '';
+    const preferredId =
+      account.mode === 'school'
+        ? account.staffId || account.identifier
+        : account.identifier;
+
+    setSchoolCode(preferredCode);
+    setSchoolInput(preferredCode || preferredId);
+    setIdentifier(preferredId);
     setPassword('');
+    if (!preferredCode) {
+      setUrlSchoolBranding(null);
+    }
     setStep('password');
-    requestAnimationFrame(() => {
-      passwordInputRef.current?.focus();
-    });
+    requestAnimationFrame(() => passwordInputRef.current?.focus());
   };
+
+  const subtitleText =
+    step === 'school'
+      ? 'Enter your School ID first (or Super Admin email)'
+      : step === 'identifier'
+        ? 'Enter your short Staff ID (e.g. 001) to continue'
+        : 'Enter your personal password to open your workspace';
 
   return (
     <div
@@ -169,11 +275,7 @@ export function LoginView({
             <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900">
               {urlSchoolBranding ? urlSchoolBranding.name : 'Sign in to SchuleFlow'}
             </h1>
-            <p className="text-sm text-slate-600 mt-1">
-              {step === 'identifier'
-                ? 'Enter your Staff ID, email, username, or phone to continue'
-                : 'Enter your personal password to open your workspace'}
-            </p>
+            <p className="text-sm text-slate-600 mt-1">{subtitleText}</p>
           </div>
         </div>
 
@@ -185,17 +287,17 @@ export function LoginView({
               : undefined
           }
         >
-          {error && (
+          {displayError && (
             <div
               role="alert"
               className="flex items-start gap-2.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3 text-xs text-red-800"
             >
               <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden="true" />
-              <span>{error}</span>
+              <span>{displayError}</span>
             </div>
           )}
 
-          {step === 'identifier' && recentAccounts.length > 0 && (
+          {step === 'school' && recentAccounts.length > 0 && (
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-semibold text-slate-600 flex items-center gap-1.5">
@@ -205,49 +307,136 @@ export function LoginView({
                 <span className="text-[11px] text-slate-400">Saved on this browser</span>
               </div>
               <div className="space-y-1.5">
-                {recentAccounts.map((acc) => (
-                  <div
-                    key={`${acc.schoolId ?? 'platform'}:${acc.identifier}`}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/60 hover:bg-slate-100/80 px-3 py-2 text-xs transition-colors"
-                  >
-                    <button
-                      type="button"
-                      disabled={loading}
-                      onClick={() => handlePickRecentAccount(acc)}
-                      className="flex-1 min-w-0 text-left"
+                {recentAccounts.map((acc) => {
+                  const displayId = acc.staffId || acc.identifier;
+                  return (
+                    <div
+                      key={`${acc.schoolId ?? 'platform'}:${acc.identifier}`}
+                      className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/60 hover:bg-slate-100/80 px-3 py-2 text-xs transition-colors"
                     >
-                      <div className="font-semibold text-slate-900 truncate">
-                        {acc.name}{' '}
-                        <span className="font-normal text-slate-500">· {acc.roleLabel}</span>
-                      </div>
-                      <div className="text-[11px] text-slate-500 truncate font-mono">
-                        {acc.identifier} · {acc.schoolName}
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={loading}
-                      onClick={() => onRemoveRecentAccount(acc.identifier, acc.schoolId)}
-                      title="Remove saved account from this browser"
-                      aria-label={`Remove ${acc.name} from saved accounts`}
-                      className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-white shrink-0"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                ))}
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => handlePickRecentAccount(acc)}
+                        className="flex-1 min-w-0 text-left"
+                      >
+                        <div className="font-semibold text-slate-900 truncate">
+                          {acc.name}{' '}
+                          <span className="font-normal text-slate-500">· {acc.roleLabel}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate font-mono">
+                          {acc.schoolCode ? `${acc.schoolCode} · ID ${displayId}` : displayId} ·{' '}
+                          {acc.schoolName}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        onClick={() => onRemoveRecentAccount(acc.identifier, acc.schoolId)}
+                        title="Remove saved account from this browser"
+                        aria-label={`Remove ${acc.name} from saved accounts`}
+                        className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-white shrink-0"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           )}
 
-          {step === 'identifier' ? (
+          {step === 'school' && (
+            <form onSubmit={handleSchoolStepContinue} className="space-y-4">
+              <div>
+                <label
+                  htmlFor="login-school-input"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  School ID
+                </label>
+                <div className="relative">
+                  <Building2
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    ref={schoolInputRef}
+                    id="login-school-input"
+                    type="text"
+                    autoComplete="organization"
+                    autoFocus
+                    required
+                    disabled={isBusy}
+                    value={schoolInput}
+                    onChange={(e) => {
+                      setLocalError(null);
+                      setSchoolInput(e.target.value);
+                    }}
+                    placeholder="e.g. JIS-101"
+                    className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                  />
+                </div>
+                <p className="mt-1.5 text-[11px] text-slate-500">
+                  Enter your registered School ID to unlock your school. Platform Super Admin may enter their email.
+                </p>
+              </div>
+
+              <button
+                type="submit"
+                disabled={isBusy || !schoolInput.trim()}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-950 disabled:opacity-60 transition-colors"
+              >
+                {lookingUpSchool ? (
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                )}
+                <span>{lookingUpSchool ? 'Checking School ID...' : 'Continue'}</span>
+              </button>
+
+              <div className="text-center pt-1">
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => setRecoveryOpen(true)}
+                  className="text-xs font-medium text-blue-800 hover:text-blue-950 hover:underline"
+                >
+                  Forgot login info?
+                </button>
+              </div>
+            </form>
+          )}
+
+          {step === 'identifier' && (
             <form onSubmit={handleIdentifierContinue} className="space-y-4">
+              <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  <KeyRound className="h-3.5 w-3.5 text-blue-800 shrink-0" aria-hidden="true" />
+                  <span className="font-mono font-semibold text-slate-900 shrink-0">
+                    {schoolCode}
+                  </span>
+                  {urlSchoolBranding && (
+                    <span className="text-slate-500 truncate">· {urlSchoolBranding.name}</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={handleChangeSchool}
+                  className="inline-flex items-center gap-1 font-semibold text-blue-800 hover:text-blue-950 shrink-0"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Change</span>
+                </button>
+              </div>
+
               <div>
                 <label
                   htmlFor="login-identifier"
                   className="block text-xs font-medium text-slate-700 mb-1.5"
                 >
-                  Staff ID, Email, Username, or Phone
+                  Your Staff ID
                 </label>
                 <input
                   ref={identifierInputRef}
@@ -256,17 +445,23 @@ export function LoginView({
                   autoComplete="username"
                   autoFocus
                   required
-                  disabled={loading}
+                  disabled={isBusy}
                   value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
-                  placeholder="e.g. KHHS-TCH-001 or user@school.ac.ug"
-                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
+                  onChange={(e) => {
+                    setLocalError(null);
+                    setIdentifier(e.target.value);
+                  }}
+                  placeholder="e.g. 001"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-sm tracking-wider text-slate-900 placeholder:font-sans placeholder:tracking-normal placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                 />
+                <p className="mt-1.5 text-[11px] text-slate-500">
+                  Enter your short 3-digit Staff ID (e.g. 001, 002) — or your school email.
+                </p>
               </div>
 
               <button
                 type="submit"
-                disabled={loading || !identifier.trim()}
+                disabled={isBusy || !identifier.trim()}
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-950 disabled:opacity-60 transition-colors"
               >
                 <span>Continue</span>
@@ -276,7 +471,7 @@ export function LoginView({
               <div className="text-center pt-1">
                 <button
                   type="button"
-                  disabled={loading}
+                  disabled={isBusy}
                   onClick={() => setRecoveryOpen(true)}
                   className="text-xs font-medium text-blue-800 hover:text-blue-950 hover:underline"
                 >
@@ -284,13 +479,17 @@ export function LoginView({
                 </button>
               </div>
             </form>
-          ) : (
+          )}
+
+          {step === 'password' && (
             <form onSubmit={handlePasswordSubmit} className="space-y-4">
               <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-                <span className="font-mono text-slate-800 truncate">{identifier.trim()}</span>
+                <span className="font-mono text-slate-800 truncate">
+                  {schoolCode ? `${schoolCode} · ID ${identifier.trim()}` : identifier.trim()}
+                </span>
                 <button
                   type="button"
-                  disabled={loading}
+                  disabled={isBusy}
                   onClick={handleChangeIdentifier}
                   className="inline-flex items-center gap-1 font-semibold text-blue-800 hover:text-blue-950 shrink-0"
                 >
@@ -305,7 +504,7 @@ export function LoginView({
                     htmlFor="login-school-code"
                     className="block text-xs font-medium text-slate-700 mb-1.5"
                   >
-                    School Code *
+                    School ID *
                   </label>
                   <div className="relative">
                     <KeyRound
@@ -316,10 +515,14 @@ export function LoginView({
                       id="login-school-code"
                       type="text"
                       required
-                      disabled={loading}
+                      disabled={isBusy}
                       value={schoolCode}
-                      onChange={(e) => setSchoolCode(e.target.value.toUpperCase())}
-                      placeholder="e.g. KHHS-101"
+                      onChange={(e) => {
+                        setLocalError(null);
+                        onClearError();
+                        setSchoolCode(e.target.value.toUpperCase());
+                      }}
+                      placeholder="e.g. JIS-101"
                       autoComplete="organization"
                       className="w-full rounded-lg border border-slate-300 bg-white pl-9 pr-3.5 py-2.5 font-mono text-sm uppercase tracking-wider text-slate-900 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-400 focus:border-blue-800 focus:outline-none"
                     />
@@ -337,7 +540,7 @@ export function LoginView({
                   </label>
                   <button
                     type="button"
-                    disabled={loading}
+                    disabled={isBusy}
                     onClick={() => setRecoveryOpen(true)}
                     className="text-xs font-medium text-blue-800 hover:text-blue-950 hover:underline"
                   >
@@ -352,7 +555,7 @@ export function LoginView({
                     autoComplete="current-password"
                     autoFocus
                     required
-                    disabled={loading}
+                    disabled={isBusy}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Enter your password"
@@ -373,7 +576,7 @@ export function LoginView({
                 <input
                   type="checkbox"
                   checked={rememberMe}
-                  disabled={loading}
+                  disabled={isBusy}
                   onChange={(e) => setRememberMe(e.target.checked)}
                   className="h-3.5 w-3.5 rounded border-slate-300"
                 />
@@ -383,7 +586,7 @@ export function LoginView({
               <button
                 type="submit"
                 disabled={
-                  loading || !password || (disambiguateSchoolCode && !schoolCode.trim())
+                  isBusy || !password || (disambiguateSchoolCode && !schoolCode.trim())
                 }
                 className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-950 disabled:opacity-60 transition-colors"
               >
@@ -410,7 +613,9 @@ export function LoginView({
         onClose={() => setRecoveryOpen(false)}
         onRecoveredSignInHint={(recoveredIdentifier, recoveredSchoolCode) => {
           onClearError();
+          setLocalError(null);
           setSchoolCode(recoveredSchoolCode ?? '');
+          setSchoolInput(recoveredSchoolCode ?? recoveredIdentifier);
           setDisambiguateSchoolCode(false);
           setIdentifier(recoveredIdentifier);
           setPassword('');

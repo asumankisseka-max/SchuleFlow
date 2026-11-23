@@ -111,14 +111,14 @@ export const DEFAULT_REPORT_CARD_LAYOUT: ReportCardLayoutConfig = {
 };
 
 export const DEFAULT_SCHOOL_SETTINGS: SchoolSettings = {
-  schoolName: 'Kampala Horizon High School',
+  schoolName: 'Jangu International School',
   schoolAddress: 'Plot 28 Kira-Ntinda Road, Kampala, Uganda',
   schoolPhone: '+256 414 550 812',
-  schoolEmail: 'dos@kampalahorizon.ac.ug',
+  schoolEmail: 'info@jangu.ac.ug',
   academicYear: '2026',
   termName: 'Term III',
-  principalName: 'Mr. Godfrey Ssemakula',
-  dosName: 'Mrs. Grace Nakimuli',
+  principalName: 'Eng. Ronald Kiggundu',
+  dosName: 'Ms. Justine Nabwire',
   cbcConfig: DEFAULT_CBC_CONFIG,
   alevelPolicy: DEFAULT_ALEVEL_POLICY,
   olevelGradingScale: DEFAULT_OLEVEL_GRADING_SCALE,
@@ -130,7 +130,7 @@ const SEED_USERS: UserAccount[] = [
   {
     id: 'usr-admin',
     name: 'Eng. Ronald Kiggundu',
-    email: 'admin@kampalahorizon.ac.ug',
+    email: 'admin@jangu.ac.ug',
     username: 'admin',
     password: 'password123',
     role: 'school_admin',
@@ -141,48 +141,44 @@ const SEED_USERS: UserAccount[] = [
     lastLogin: '2026-11-15T07:45:00Z',
   },
   {
-    id: 'usr-dos',
-    name: 'Mrs. Grace Nakimuli',
-    email: 'dos@kampalahorizon.ac.ug',
-    username: 'dos',
-    password: 'password123',
-    role: 'dos',
-    active: true,
-    phone: '+256 701 348 220',
-    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci', 'cls-s6-arts'],
-    assignedSubjectIds: [],
-    lastLogin: '2026-11-15T08:10:00Z',
-  },
-  {
     id: 'usr-teacher-math',
     name: 'Mr. Brian Ssebunya',
-    email: 'bssebunya@kampalahorizon.ac.ug',
-    username: 'teacher',
+    email: 'bssebunya@jangu.ac.ug',
+    username: 'bssebunya',
     password: 'password123',
     role: 'teacher',
     active: true,
     phone: '+256 774 881 902',
-    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci'],
-    assignedSubjectIds: ['sub-o-math', 'sub-o-phys', 'sub-a-math', 'sub-a-phys'],
+    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci', 'cls-s6-arts'],
+    assignedSubjectIds: ['sub-o-math', 'sub-o-phys', 'sub-a-math', 'sub-a-phys', 'sub-a-smath'],
     lastLogin: '2026-11-15T08:30:00Z',
   },
   {
     id: 'usr-teacher-hum',
     name: 'Ms. Justine Nabwire',
-    email: 'jnabwire@kampalahorizon.ac.ug',
+    email: 'jnabwire@jangu.ac.ug',
     username: 'jnabwire',
     password: 'password123',
     role: 'teacher',
     active: true,
     phone: '+256 752 612 409',
-    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s6-arts'],
-    assignedSubjectIds: ['sub-o-engl', 'sub-o-hist', 'sub-a-gp', 'sub-a-hist'],
+    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci', 'cls-s6-arts'],
+    assignedSubjectIds: [
+      'sub-o-engl',
+      'sub-o-hist',
+      'sub-o-geog',
+      'sub-o-entr',
+      'sub-a-hist',
+      'sub-a-econ',
+      'sub-a-geog',
+      'sub-a-gp',
+    ],
     lastLogin: '2026-11-14T16:12:00Z',
   },
   {
     id: 'usr-teacher-sci',
     name: 'Dr. Emmanuel Okello',
-    email: 'eokello@kampalahorizon.ac.ug',
+    email: 'eokello@jangu.ac.ug',
     username: 'eokello',
     password: 'password123',
     role: 'teacher',
@@ -191,32 +187,6 @@ const SEED_USERS: UserAccount[] = [
     assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci'],
     assignedSubjectIds: ['sub-o-biol', 'sub-o-chem', 'sub-o-ict', 'sub-a-chem', 'sub-a-bio', 'sub-a-sict'],
     lastLogin: '2026-11-14T15:05:00Z',
-  },
-  {
-    id: 'usr-head',
-    name: 'Mr. Godfrey Ssemakula',
-    email: 'headteacher@kampalahorizon.ac.ug',
-    username: 'headteacher',
-    password: 'password123',
-    role: 'headteacher',
-    active: true,
-    phone: '+256 772 900 100',
-    assignedClassIds: ['cls-s2-east', 'cls-s3-west', 'cls-s5-sci', 'cls-s6-arts'],
-    assignedSubjectIds: [],
-    lastLogin: '2026-11-15T07:55:00Z',
-  },
-  {
-    id: 'usr-bursar',
-    name: 'Ms. Harriet Namukasa',
-    email: 'bursar@kampalahorizon.ac.ug',
-    username: 'bursar',
-    password: 'password123',
-    role: 'bursar',
-    active: true,
-    phone: '+256 772 514 902',
-    assignedClassIds: [],
-    assignedSubjectIds: [],
-    lastLogin: '2026-11-15T08:05:00Z',
   },
 ];
 
@@ -494,7 +464,7 @@ const SEED_CLASSES: StreamClass[] = [
       'sub-o-engl': 'usr-teacher-hum',
       'sub-o-phys': 'usr-teacher-math',
       'sub-o-hist': 'usr-teacher-hum',
-      'sub-o-entr': 'usr-dos',
+      'sub-o-entr': 'usr-teacher-hum',
     },
   },
   {
@@ -523,7 +493,7 @@ const SEED_CLASSES: StreamClass[] = [
     subjectIds: ['sub-a-hist', 'sub-a-econ', 'sub-a-geog', 'sub-a-gp', 'sub-a-smath'],
     subjectTeacherMap: {
       'sub-a-hist': 'usr-teacher-hum',
-      'sub-a-econ': 'usr-dos',
+      'sub-a-econ': 'usr-teacher-hum',
       'sub-a-geog': 'usr-teacher-hum',
       'sub-a-gp': 'usr-teacher-hum',
       'sub-a-smath': 'usr-teacher-math',
@@ -533,41 +503,41 @@ const SEED_CLASSES: StreamClass[] = [
 
 const SEED_STUDENTS: StudentProfile[] = [
   // S.2 East (10 students)
-  { id: 'stu-s2-01', admissionNo: 'KHHS/26/201', fullName: 'Namukasa Sarah', gender: 'F', dateOfBirth: '2011-03-14', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Rebecca Namukasa', parentContact: '+256 772 301 112' },
-  { id: 'stu-s2-02', admissionNo: 'KHHS/26/202', fullName: 'Ssempijja Daniel', gender: 'M', dateOfBirth: '2011-06-22', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Paul Ssempijja', parentContact: '+256 701 442 890' },
-  { id: 'stu-s2-03', admissionNo: 'KHHS/26/203', fullName: 'Achieng Grace', gender: 'F', dateOfBirth: '2011-01-09', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Francis Ochieng', parentContact: '+256 782 990 314' },
-  { id: 'stu-s2-04', admissionNo: 'KHHS/26/204', fullName: 'Tumusiime Ivan', gender: 'M', dateOfBirth: '2010-11-18', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Sylvia Tumusiime', parentContact: '+256 752 813 400' },
-  { id: 'stu-s2-05', admissionNo: 'KHHS/26/205', fullName: 'Nakato Brenda', gender: 'F', dateOfBirth: '2011-05-30', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. John Kizza', parentContact: '+256 774 221 678' },
-  { id: 'stu-s2-06', admissionNo: 'KHHS/26/206', fullName: 'Mugisha Trevor', gender: 'M', dateOfBirth: '2011-08-04', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Harriet Mugisha', parentContact: '+256 704 118 552' },
-  { id: 'stu-s2-07', admissionNo: 'KHHS/26/207', fullName: 'Byaruhanga Miriam', gender: 'F', dateOfBirth: '2011-02-17', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Dr. Patrick Byaruhanga', parentContact: '+256 772 650 321' },
-  { id: 'stu-s2-08', admissionNo: 'KHHS/26/208', fullName: 'Wasswa Timothy', gender: 'M', dateOfBirth: '2011-05-30', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. John Kizza', parentContact: '+256 774 221 678' },
-  { id: 'stu-s2-09', admissionNo: 'KHHS/26/209', fullName: 'Birungi Esther', gender: 'F', dateOfBirth: '2011-09-12', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Peace Birungi', parentContact: '+256 781 404 991' },
-  { id: 'stu-s2-10', admissionNo: 'KHHS/26/210', fullName: 'Okot Emmanuel', gender: 'M', dateOfBirth: '2010-12-03', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Moses Okot', parentContact: '+256 776 319 005' },
+  { id: 'stu-s2-01', admissionNo: 'JIS/26/201', fullName: 'Namukasa Sarah', gender: 'F', dateOfBirth: '2011-03-14', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Rebecca Namukasa', parentContact: '+256 772 301 112' },
+  { id: 'stu-s2-02', admissionNo: 'JIS/26/202', fullName: 'Ssempijja Daniel', gender: 'M', dateOfBirth: '2011-06-22', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Paul Ssempijja', parentContact: '+256 701 442 890' },
+  { id: 'stu-s2-03', admissionNo: 'JIS/26/203', fullName: 'Achieng Grace', gender: 'F', dateOfBirth: '2011-01-09', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Francis Ochieng', parentContact: '+256 782 990 314' },
+  { id: 'stu-s2-04', admissionNo: 'JIS/26/204', fullName: 'Tumusiime Ivan', gender: 'M', dateOfBirth: '2010-11-18', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Sylvia Tumusiime', parentContact: '+256 752 813 400' },
+  { id: 'stu-s2-05', admissionNo: 'JIS/26/205', fullName: 'Nakato Brenda', gender: 'F', dateOfBirth: '2011-05-30', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. John Kizza', parentContact: '+256 774 221 678' },
+  { id: 'stu-s2-06', admissionNo: 'JIS/26/206', fullName: 'Mugisha Trevor', gender: 'M', dateOfBirth: '2011-08-04', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Harriet Mugisha', parentContact: '+256 704 118 552' },
+  { id: 'stu-s2-07', admissionNo: 'JIS/26/207', fullName: 'Byaruhanga Miriam', gender: 'F', dateOfBirth: '2011-02-17', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Dr. Patrick Byaruhanga', parentContact: '+256 772 650 321' },
+  { id: 'stu-s2-08', admissionNo: 'JIS/26/208', fullName: 'Wasswa Timothy', gender: 'M', dateOfBirth: '2011-05-30', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. John Kizza', parentContact: '+256 774 221 678' },
+  { id: 'stu-s2-09', admissionNo: 'JIS/26/209', fullName: 'Birungi Esther', gender: 'F', dateOfBirth: '2011-09-12', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mrs. Peace Birungi', parentContact: '+256 781 404 991' },
+  { id: 'stu-s2-10', admissionNo: 'JIS/26/210', fullName: 'Okot Emmanuel', gender: 'M', dateOfBirth: '2010-12-03', classId: 'cls-s2-east', academicYear: '2026', status: 'active', parentName: 'Mr. Moses Okot', parentContact: '+256 776 319 005' },
 
   // S.3 West (6 students)
-  { id: 'stu-s3-01', admissionNo: 'KHHS/25/301', fullName: 'Kato Samuel', gender: 'M', dateOfBirth: '2010-04-11', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. George Kato', parentContact: '+256 772 710 443' },
-  { id: 'stu-s3-02', admissionNo: 'KHHS/25/302', fullName: 'Nabulya Faith', gender: 'F', dateOfBirth: '2010-07-19', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Prossy Nabulya', parentContact: '+256 701 882 340' },
-  { id: 'stu-s3-03', admissionNo: 'KHHS/25/303', fullName: 'Opio Brian', gender: 'M', dateOfBirth: '2010-02-26', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. Andrew Opio', parentContact: '+256 782 553 118' },
-  { id: 'stu-s3-04', admissionNo: 'KHHS/25/304', fullName: 'Akello Judith', gender: 'F', dateOfBirth: '2010-10-08', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Beatrice Akello', parentContact: '+256 753 200 719' },
-  { id: 'stu-s3-05', admissionNo: 'KHHS/25/305', fullName: 'Muwonge Jonathan', gender: 'M', dateOfBirth: '2009-12-20', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. Henry Muwonge', parentContact: '+256 775 411 820' },
-  { id: 'stu-s3-06', admissionNo: 'KHHS/25/306', fullName: 'Nansubuga Gloria', gender: 'F', dateOfBirth: '2010-05-15', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Agnes Nansubuga', parentContact: '+256 702 661 904' },
+  { id: 'stu-s3-01', admissionNo: 'JIS/25/301', fullName: 'Kato Samuel', gender: 'M', dateOfBirth: '2010-04-11', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. George Kato', parentContact: '+256 772 710 443' },
+  { id: 'stu-s3-02', admissionNo: 'JIS/25/302', fullName: 'Nabulya Faith', gender: 'F', dateOfBirth: '2010-07-19', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Prossy Nabulya', parentContact: '+256 701 882 340' },
+  { id: 'stu-s3-03', admissionNo: 'JIS/25/303', fullName: 'Opio Brian', gender: 'M', dateOfBirth: '2010-02-26', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. Andrew Opio', parentContact: '+256 782 553 118' },
+  { id: 'stu-s3-04', admissionNo: 'JIS/25/304', fullName: 'Akello Judith', gender: 'F', dateOfBirth: '2010-10-08', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Beatrice Akello', parentContact: '+256 753 200 719' },
+  { id: 'stu-s3-05', admissionNo: 'JIS/25/305', fullName: 'Muwonge Jonathan', gender: 'M', dateOfBirth: '2009-12-20', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mr. Henry Muwonge', parentContact: '+256 775 411 820' },
+  { id: 'stu-s3-06', admissionNo: 'JIS/25/306', fullName: 'Nansubuga Gloria', gender: 'F', dateOfBirth: '2010-05-15', classId: 'cls-s3-west', academicYear: '2026', status: 'active', parentName: 'Mrs. Agnes Nansubuga', parentContact: '+256 702 661 904' },
 
   // S.5 Science (8 students)
-  { id: 'stu-s5-01', admissionNo: 'KHHS/26/501', fullName: 'Kabanda Marvin', gender: 'M', dateOfBirth: '2008-03-08', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Eng. Peter Kabanda', parentContact: '+256 772 800 512' },
-  { id: 'stu-s5-02', admissionNo: 'KHHS/26/502', fullName: 'Nalwoga Patricia', gender: 'F', dateOfBirth: '2008-06-14', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Joan Nalwoga', parentContact: '+256 701 992 103' },
-  { id: 'stu-s5-03', admissionNo: 'KHHS/26/503', fullName: 'Kibombo Allan', gender: 'M', dateOfBirth: '2008-01-25', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Charles Kibombo', parentContact: '+256 782 140 776' },
-  { id: 'stu-s5-04', admissionNo: 'KHHS/26/504', fullName: 'Atuhaire Sandra', gender: 'F', dateOfBirth: '2008-09-02', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Doreen Atuhaire', parentContact: '+256 752 330 412' },
-  { id: 'stu-s5-05', admissionNo: 'KHHS/26/505', fullName: 'Onyango Victor', gender: 'M', dateOfBirth: '2007-11-19', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Stephen Onyango', parentContact: '+256 774 510 923' },
-  { id: 'stu-s5-06', admissionNo: 'KHHS/26/506', fullName: 'Mbabazi Lydia', gender: 'F', dateOfBirth: '2008-04-28', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Kenneth Mbabazi', parentContact: '+256 703 771 208' },
-  { id: 'stu-s5-07', admissionNo: 'KHHS/26/507', fullName: 'Ssekandi Arnold', gender: 'M', dateOfBirth: '2008-08-12', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Betty Ssekandi', parentContact: '+256 779 220 441' },
-  { id: 'stu-s5-08', admissionNo: 'KHHS/26/508', fullName: 'Kyomuhendo Ruth', gender: 'F', dateOfBirth: '2008-02-05', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Dr. Grace Kyomuhendo', parentContact: '+256 772 511 089' },
+  { id: 'stu-s5-01', admissionNo: 'JIS/26/501', fullName: 'Kabanda Marvin', gender: 'M', dateOfBirth: '2008-03-08', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Eng. Peter Kabanda', parentContact: '+256 772 800 512' },
+  { id: 'stu-s5-02', admissionNo: 'JIS/26/502', fullName: 'Nalwoga Patricia', gender: 'F', dateOfBirth: '2008-06-14', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Joan Nalwoga', parentContact: '+256 701 992 103' },
+  { id: 'stu-s5-03', admissionNo: 'JIS/26/503', fullName: 'Kibombo Allan', gender: 'M', dateOfBirth: '2008-01-25', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Charles Kibombo', parentContact: '+256 782 140 776' },
+  { id: 'stu-s5-04', admissionNo: 'JIS/26/504', fullName: 'Atuhaire Sandra', gender: 'F', dateOfBirth: '2008-09-02', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Doreen Atuhaire', parentContact: '+256 752 330 412' },
+  { id: 'stu-s5-05', admissionNo: 'JIS/26/505', fullName: 'Onyango Victor', gender: 'M', dateOfBirth: '2007-11-19', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Stephen Onyango', parentContact: '+256 774 510 923' },
+  { id: 'stu-s5-06', admissionNo: 'JIS/26/506', fullName: 'Mbabazi Lydia', gender: 'F', dateOfBirth: '2008-04-28', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mr. Kenneth Mbabazi', parentContact: '+256 703 771 208' },
+  { id: 'stu-s5-07', admissionNo: 'JIS/26/507', fullName: 'Ssekandi Arnold', gender: 'M', dateOfBirth: '2008-08-12', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Mrs. Betty Ssekandi', parentContact: '+256 779 220 441' },
+  { id: 'stu-s5-08', admissionNo: 'JIS/26/508', fullName: 'Kyomuhendo Ruth', gender: 'F', dateOfBirth: '2008-02-05', classId: 'cls-s5-sci', academicYear: '2026', status: 'active', combinationId: 'comb-pcm', parentName: 'Dr. Grace Kyomuhendo', parentContact: '+256 772 511 089' },
 
   // S.6 Arts (5 students)
-  { id: 'stu-s6-01', admissionNo: 'KHHS/25/601', fullName: 'Nanyonjo Claire', gender: 'F', dateOfBirth: '2007-05-16', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mrs. Margaret Nanyonjo', parentContact: '+256 772 190 442' },
-  { id: 'stu-s6-02', admissionNo: 'KHHS/25/602', fullName: 'Bukenya Isaac', gender: 'M', dateOfBirth: '2007-03-21', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. Joseph Bukenya', parentContact: '+256 701 667 891' },
-  { id: 'stu-s6-03', admissionNo: 'KHHS/25/603', fullName: 'Asiimwe Sharon', gender: 'F', dateOfBirth: '2007-09-10', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mrs. Olivia Asiimwe', parentContact: '+256 782 401 229' },
-  { id: 'stu-s6-04', admissionNo: 'KHHS/25/604', fullName: 'Lubega Derrick', gender: 'M', dateOfBirth: '2007-01-30', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. Samuel Lubega', parentContact: '+256 752 741 330' },
-  { id: 'stu-s6-05', admissionNo: 'KHHS/25/605', fullName: 'Namono Pauline', gender: 'F', dateOfBirth: '2007-07-07', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. David Namono', parentContact: '+256 774 908 114' },
+  { id: 'stu-s6-01', admissionNo: 'JIS/25/601', fullName: 'Nanyonjo Claire', gender: 'F', dateOfBirth: '2007-05-16', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mrs. Margaret Nanyonjo', parentContact: '+256 772 190 442' },
+  { id: 'stu-s6-02', admissionNo: 'JIS/25/602', fullName: 'Bukenya Isaac', gender: 'M', dateOfBirth: '2007-03-21', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. Joseph Bukenya', parentContact: '+256 701 667 891' },
+  { id: 'stu-s6-03', admissionNo: 'JIS/25/603', fullName: 'Asiimwe Sharon', gender: 'F', dateOfBirth: '2007-09-10', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mrs. Olivia Asiimwe', parentContact: '+256 782 401 229' },
+  { id: 'stu-s6-04', admissionNo: 'JIS/25/604', fullName: 'Lubega Derrick', gender: 'M', dateOfBirth: '2007-01-30', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. Samuel Lubega', parentContact: '+256 752 741 330' },
+  { id: 'stu-s6-05', admissionNo: 'JIS/25/605', fullName: 'Namono Pauline', gender: 'F', dateOfBirth: '2007-07-07', classId: 'cls-s6-arts', academicYear: '2026', status: 'active', combinationId: 'comb-heg', parentName: 'Mr. David Namono', parentContact: '+256 774 908 114' },
 ];
 
 const SEED_EXAMS: ExaminationPeriod[] = [
@@ -739,7 +709,7 @@ function buildSeedMarksheets(): MarksheetRecord[] {
       submittedBy: status !== 'draft' ? teacherId : undefined,
       approvedAt:
         status === 'approved' || status === 'published' ? '2026-11-13T14:20:00Z' : undefined,
-      approvedBy: status === 'approved' || status === 'published' ? 'usr-dos' : undefined,
+      approvedBy: status === 'approved' || status === 'published' ? 'usr-admin' : undefined,
       dosComment,
       lastModified: '2026-11-14T10:15:00Z',
       auditHistory: [
@@ -770,10 +740,10 @@ function buildSeedMarksheets(): MarksheetRecord[] {
               {
                 id: `aud-3-${examId}-${classId}-${subjectId}`,
                 timestamp: '2026-11-13T14:20:00Z',
-                actorId: 'usr-dos',
-                actorName: 'Mrs. Grace Nakimuli',
-                actorRole: 'dos' as const,
-                action: status === 'published' ? 'Published Results' : 'Approved by DOS',
+                actorId: 'usr-admin',
+                actorName: 'Eng. Ronald Kiggundu',
+                actorRole: 'school_admin' as const,
+                action: status === 'published' ? 'Published Results' : 'Approved by School Admin',
                 details: 'Verified completeness and grading calculations',
               },
             ]
@@ -783,9 +753,9 @@ function buildSeedMarksheets(): MarksheetRecord[] {
               {
                 id: `aud-4-${examId}-${classId}-${subjectId}`,
                 timestamp: '2026-11-13T15:10:00Z',
-                actorId: 'usr-dos',
-                actorName: 'Mrs. Grace Nakimuli',
-                actorRole: 'dos' as const,
+                actorId: 'usr-admin',
+                actorName: 'Eng. Ronald Kiggundu',
+                actorRole: 'school_admin' as const,
                 action: 'Returned for Revision',
                 details: dosComment ?? 'Please verify missing or borderline marks.',
               },
@@ -863,7 +833,7 @@ function buildSeedMarksheets(): MarksheetRecord[] {
     'usr-teacher-hum',
     'returned',
     makeOlevelEntries(s2Ids, shiftOlevel(S2_ALT_SCORES, 0, -2), true),
-    'Missing U3 & EoT marks for Okot Emmanuel (KHHS/26/210). Please verify attendance register and update.'
+    'Missing U3 & EoT marks for Okot Emmanuel (JIS/26/210). Please verify attendance register and update.'
   );
   addSheet('exam-2026-t3', 'cls-s2-east', 'sub-o-ict', 'usr-teacher-sci', 'approved', makeOlevelEntries(s2Ids, shiftOlevel(S2_MATH_SCORES, 0.1, 3)));
 
@@ -872,7 +842,7 @@ function buildSeedMarksheets(): MarksheetRecord[] {
   addSheet('exam-2026-t3', 'cls-s3-west', 'sub-o-engl', 'usr-teacher-hum', 'approved', makeOlevelEntries(s3Ids, S2_ALT_SCORES));
   addSheet('exam-2026-t3', 'cls-s3-west', 'sub-o-phys', 'usr-teacher-math', 'draft', makeOlevelEntries(s3Ids, shiftOlevel(S2_SCI_SCORES, 0, -1), true));
   addSheet('exam-2026-t3', 'cls-s3-west', 'sub-o-hist', 'usr-teacher-hum', 'approved', makeOlevelEntries(s3Ids, shiftOlevel(S2_ALT_SCORES, -0.1, -3)));
-  addSheet('exam-2026-t3', 'cls-s3-west', 'sub-o-entr', 'usr-dos', 'approved', makeOlevelEntries(s3Ids, shiftOlevel(S2_MATH_SCORES, 0.1, 2)));
+  addSheet('exam-2026-t3', 'cls-s3-west', 'sub-o-entr', 'usr-teacher-hum', 'approved', makeOlevelEntries(s3Ids, shiftOlevel(S2_MATH_SCORES, 0.1, 2)));
 
   // S.5 Science (A'Level)
   addSheet('exam-2026-t3', 'cls-s5-sci', 'sub-a-math', 'usr-teacher-math', 'approved', makeAlevelEntries(s5Ids, [91, 76, 88, 62, 95, 71, 42, 82]));
@@ -883,7 +853,7 @@ function buildSeedMarksheets(): MarksheetRecord[] {
 
   // S.6 Arts (A'Level)
   addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-hist', 'usr-teacher-hum', 'approved', makeAlevelEntries(s6Ids, [85, 73, 81, 60, 89]));
-  addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-econ', 'usr-dos', 'approved', makeAlevelEntries(s6Ids, [82, 69, 77, 56, 86]));
+  addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-econ', 'usr-teacher-hum', 'approved', makeAlevelEntries(s6Ids, [82, 69, 77, 56, 86]));
   addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-geog', 'usr-teacher-hum', 'submitted', makeAlevelEntries(s6Ids, [80, 74, 79, 63, 84]));
   addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-gp', 'usr-teacher-hum', 'approved', makeAlevelEntries(s6Ids, [84, 76, 82, 68, 87]));
   addSheet('exam-2026-t3', 'cls-s6-arts', 'sub-a-smath', 'usr-teacher-math', 'draft', makeAlevelEntries(s6Ids, [74, 65, 71, 48, 79]));
@@ -896,10 +866,10 @@ export const INITIAL_SCHOOL_DATABASE: SchoolDatabase = {
   loginActivity: [
     {
       id: 'log-1',
-      userId: 'usr-dos',
-      userName: 'Mrs. Grace Nakimuli',
-      role: 'dos',
-      timestamp: '2026-11-15T08:10:00Z',
+      userId: 'usr-admin',
+      userName: 'Eng. Ronald Kiggundu',
+      role: 'school_admin',
+      timestamp: '2026-11-15T07:45:00Z',
       action: 'login',
     },
     {
@@ -912,10 +882,10 @@ export const INITIAL_SCHOOL_DATABASE: SchoolDatabase = {
     },
     {
       id: 'log-3',
-      userId: 'usr-head',
-      userName: 'Mr. Godfrey Ssemakula',
-      role: 'headteacher',
-      timestamp: '2026-11-15T07:55:00Z',
+      userId: 'usr-teacher-hum',
+      userName: 'Ms. Justine Nabwire',
+      role: 'teacher',
+      timestamp: '2026-11-15T08:10:00Z',
       action: 'login',
     },
   ],
