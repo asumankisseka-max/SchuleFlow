@@ -3,6 +3,7 @@ dotenv.config({ path: '.env.local' });
 dotenv.config();
 import express from 'express';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -48,6 +49,7 @@ import {
 import {
   ensureInitialTenantsSeeded,
   provisionNewSchoolTenant,
+  resetCloudDatabaseToPreviewBaseline,
   type OnboardSchoolInput,
 } from './src/db/seed.ts';
 import {
@@ -59,7 +61,7 @@ import {
   resetPasswordWithRecoveryToken,
   verifyRecoveryIdentity,
 } from './src/db/users.ts';
-import { signSessionToken, verifyRecoveryToken } from './src/lib/passwordAuth.ts';
+import { signSessionToken, verifyRecoveryToken, verifySessionToken } from './src/lib/passwordAuth.ts';
 import { uploadMediaToSupabase } from './src/lib/supabaseStorage.ts';
 import {
   bulkStaffSchema,
@@ -75,25 +77,35 @@ import {
   onboardSchoolSchema,
   parseWithSchema,
   promoteStudentsSchema,
+  recoveryLookupSchema,
+  recoveryRequestAdminSchema,
+  recoveryResetPasswordSchema,
+  recoveryVerifySchema,
   remarkSchema,
+  schoolSettingsSchema,
   staffSchema,
   streamClassPayloadSchema,
   studentProfileSchema,
   subjectSchema,
+  trackReportsSchema,
+  updateSchoolSubscriptionSchema,
 } from './src/lib/validationSchemas.ts';
 import {
   SESSION_COOKIE_NAME,
   checkSchoolSubscriptionGate,
+  extractSessionToken,
   requireAuth,
   requireRoles,
   requireSuperAdmin,
   type AuthRequest,
 } from './src/middleware/auth.ts';
 import {
+  apiMutationRateLimiter,
   loginRateLimiter,
   lookupRateLimiter,
   recoveryRateLimiter,
 } from './src/middleware/rateLimit.ts';
+import { revokeUserSessionsByUid } from './src/db/users.ts';
 import {
   requireTenantScope,
   requireTenantScopeWithOptions,
@@ -112,6 +124,7 @@ import type {
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
+app.disable('x-powered-by');
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 
@@ -124,6 +137,88 @@ function isSecureRequest(req: express.Request): boolean {
   const host = (req.hostname || '').toLowerCase();
   return process.env.NODE_ENV === 'production' && host !== 'localhost' && host !== '127.0.0.1';
 }
+
+function getSessionCookieOptions(req: express.Request, maxAge?: number) {
+  const secure = isSecureRequest(req);
+  return {
+    httpOnly: true,
+    sameSite: (secure ? 'none' : 'lax') as 'none' | 'lax',
+    secure,
+    ...(secure ? { partitioned: true } : {}),
+    path: '/',
+    ...(maxAge !== undefined ? { maxAge } : {}),
+  };
+}
+
+// Security Headers Middleware (safe for AI Studio iframe & Cloud Run preview domains)
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('X-XSS-Protection', '0');
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  }
+  next();
+});
+
+// Origin / CSRF Defense Middleware on /api/v1/* state-changing requests
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+app.use('/api/v1', apiMutationRateLimiter, (req, res, next) => {
+  if (!MUTATING_METHODS.has(req.method.toUpperCase())) {
+    return next();
+  }
+
+  const expectedHost = (
+    (typeof req.headers['x-forwarded-host'] === 'string'
+      ? req.headers['x-forwarded-host'].split(',')[0].trim()
+      : '') ||
+    req.headers.host ||
+    ''
+  ).toLowerCase();
+
+  const configuredOrigin = process.env.CORS_ORIGIN?.trim().toLowerCase();
+  const originHeader = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+
+  const isAllowedOrigin = (rawOrigin: string): boolean => {
+    try {
+      const parsed = new URL(rawOrigin);
+      if (configuredOrigin && parsed.origin.toLowerCase() === configuredOrigin) {
+        return true;
+      }
+      return Boolean(expectedHost && parsed.host.toLowerCase() === expectedHost);
+    } catch {
+      return false;
+    }
+  };
+
+  if (originHeader && originHeader !== 'null') {
+    if (!isAllowedOrigin(originHeader)) {
+      return res.status(403).json({
+        error: 'Forbidden: Cross-origin state-changing request rejected.',
+      });
+    }
+  } else if (originHeader === 'null') {
+    return res.status(403).json({
+      error: 'Forbidden: Untrusted null origin rejected.',
+    });
+  }
+
+  // If authenticated via cookie without Bearer token and without trusted custom header, require matching Origin/Referer
+  const hasBearer = Boolean(req.headers.authorization?.startsWith('Bearer '));
+  const hasCookie = Boolean(req.headers.cookie?.includes(`${SESSION_COOKIE_NAME}=`));
+  const hasCustomClientHeader = req.headers['x-requested-with'] === 'SchuleFlow-Client';
+  if (hasCookie && !hasBearer && !hasCustomClientHeader && !originHeader) {
+    const referer = typeof req.headers.referer === 'string' ? req.headers.referer.trim() : '';
+    if (!referer || !isAllowedOrigin(referer)) {
+      return res.status(403).json({
+        error: 'Forbidden: Missing CSRF verification header or trusted origin.',
+      });
+    }
+  }
+
+  next();
+});
 
   /* ------------------------------------------------------------------------ */
   /* Auth & Session Context Routes (Pure PostgreSQL + HttpOnly Cookie/Bearer) */
@@ -199,13 +294,11 @@ function isSecureRequest(req: express.Request): boolean {
         schoolRole: dbUser.schoolRole,
       });
 
-      res.cookie(SESSION_COOKIE_NAME, token, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: isSecureRequest(req),
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
+      res.cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        getSessionCookieOptions(req, 7 * 24 * 60 * 60 * 1000)
+      );
 
       const allSchools = await listAllSchoolsWithStats();
       const accessibleSchools =
@@ -240,8 +333,15 @@ function isSecureRequest(req: express.Request): boolean {
     }
   });
 
-  app.post('/api/v1/auth/logout', (_req, res) => {
-    res.clearCookie(SESSION_COOKIE_NAME, { path: '/' });
+  app.post('/api/v1/auth/logout', async (req, res) => {
+    const token = extractSessionToken(req);
+    if (token) {
+      const session = verifySessionToken(token);
+      if (session?.uid) {
+        await revokeUserSessionsByUid(session.uid);
+      }
+    }
+    res.clearCookie(SESSION_COOKIE_NAME, getSessionCookieOptions(req));
     res.json({ ok: true });
   });
 
@@ -299,15 +399,14 @@ function isSecureRequest(req: express.Request): boolean {
         schoolId: updatedUser.globalRole === 'super_admin' ? null : updatedUser.schoolId,
         role: updatedUser.schoolRole,
         schoolRole: updatedUser.schoolRole,
+        iat: Math.max(Date.now(), updatedUser.sessionValidAfterMs + 1),
       });
 
-      res.cookie(SESSION_COOKIE_NAME, refreshedToken, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure: isSecureRequest(req),
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
+      res.cookie(
+        SESSION_COOKIE_NAME,
+        refreshedToken,
+        getSessionCookieOptions(req, 7 * 24 * 60 * 60 * 1000)
+      );
 
       await recordAuditLog({
         userId: updatedUser.uid,
@@ -331,18 +430,11 @@ function isSecureRequest(req: express.Request): boolean {
   app.post('/api/v1/auth/recover/lookup', recoveryRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const { identifier, schoolCode, fullName } = req.body as {
-        identifier?: string;
-        schoolCode?: string;
-        fullName?: string;
-      };
-
-      if (!identifier?.trim() && !(schoolCode?.trim() && fullName?.trim())) {
-        return res.status(400).json({
-          error:
-            'Enter your Staff ID, email, or phone — or enter your School Code and full name.',
-        });
+      const parsed = parseWithSchema(recoveryLookupSchema, req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
       }
+      const { identifier, schoolCode, fullName } = parsed.data;
 
       const found = await lookupRecoverableAccount({ identifier, schoolCode, fullName });
       if (!found) {
@@ -361,16 +453,13 @@ function isSecureRequest(req: express.Request): boolean {
   app.post('/api/v1/auth/recover/verify', recoveryRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const { recoveryToken, verification } = req.body as {
-        recoveryToken?: string;
-        verification?: string;
-      };
-
-      if (!recoveryToken || !verification?.trim()) {
+      const parsed = parseWithSchema(recoveryVerifySchema, req.body);
+      if (!parsed.ok) {
         return res.status(400).json({
           error: 'Verification details are required to unlock your login information.',
         });
       }
+      const { recoveryToken, verification } = parsed.data;
 
       const result = await verifyRecoveryIdentity(recoveryToken, verification);
       if (!result) {
@@ -398,19 +487,16 @@ function isSecureRequest(req: express.Request): boolean {
   app.post('/api/v1/auth/recover/reset-password', recoveryRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const { resetToken, newPassword } = req.body as {
-        resetToken?: string;
-        newPassword?: string;
-      };
-
-      if (!resetToken || !newPassword) {
-        return res.status(400).json({ error: 'Reset token and new password are required.' });
+      const parsed = parseWithSchema(recoveryResetPasswordSchema, req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
       }
+      const { resetToken, newPassword } = parsed.data;
 
       const updated = await resetPasswordWithRecoveryToken(resetToken, newPassword);
       if (!updated) {
         return res.status(401).json({
-          error: 'Recovery session expired. Please restart account recovery.',
+          error: 'Recovery session expired or already used. Please restart account recovery.',
         });
       }
 
@@ -440,11 +526,12 @@ function isSecureRequest(req: express.Request): boolean {
   app.post('/api/v1/auth/recover/request-admin', recoveryRateLimiter, async (req, res) => {
     try {
       await ensureInitialTenantsSeeded();
-      const { recoveryToken, note } = req.body as {
-        recoveryToken?: string;
-        note?: string;
-      };
-      const payload = recoveryToken ? verifyRecoveryToken(recoveryToken, 'lookup_verify') : null;
+      const parsed = parseWithSchema(recoveryRequestAdminSchema, req.body);
+      if (!parsed.ok) {
+        return res.status(400).json({ error: parsed.error });
+      }
+      const { recoveryToken, note } = parsed.data;
+      const payload = verifyRecoveryToken(recoveryToken, 'lookup_verify');
       if (!payload) {
         return res.status(401).json({ error: 'Recovery session expired. Please search again.' });
       }
@@ -543,8 +630,12 @@ function isSecureRequest(req: express.Request): boolean {
     requireSuperAdmin,
     async (req: AuthRequest, res) => {
       try {
+        const parsed = parseWithSchema(updateSchoolSubscriptionSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
         const { targetSchoolId } = req.params;
-        const updated = await updateSchoolSubscription(targetSchoolId, req.body);
+        const updated = await updateSchoolSubscription(targetSchoolId, parsed.data);
         if (!updated) {
           return res.status(404).json({ error: 'School tenant not found.' });
         }
@@ -601,6 +692,37 @@ function isSecureRequest(req: express.Request): boolean {
         res.json({ logs });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to load audit logs.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/v1/platform/reset-baseline',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res) => {
+      try {
+        const confirmText =
+          typeof req.body?.confirmText === 'string' ? req.body.confirmText.trim().toUpperCase() : '';
+        if (confirmText !== 'RESET') {
+          return res.status(400).json({
+            error: 'Please type RESET exactly to confirm resetting the database to the preview baseline.',
+          });
+        }
+        const result = await resetCloudDatabaseToPreviewBaseline();
+        await recordAuditLog({
+          userId: req.dbUser!.uid,
+          userEmail: req.dbUser!.email,
+          userRole: 'super_admin',
+          schoolId: result.schoolId,
+          action: 'DATABASE_RESET_TO_PREVIEW_BASELINE',
+          details: `Reset Cloud SQL database to clean preview baseline (${result.schoolName}, ${result.schoolCode}).`,
+        });
+        res.json({ ok: true, ...result });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to reset database to baseline.';
         res.status(500).json({ error: message });
       }
     }
@@ -670,6 +792,9 @@ function isSecureRequest(req: express.Request): boolean {
         const saved = await addStudentsWithQuotaCheck(schoolId, items);
         res.status(201).json({ students: saved });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to register student(s).';
         const status = message.includes('quota') ? 402 : 500;
         res.status(status).json({ error: message });
@@ -695,6 +820,9 @@ function isSecureRequest(req: express.Request): boolean {
         const updated = await updateTenantStudent(schoolId, parsed.data as StudentProfile);
         res.json({ student: updated });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to update student.';
         res.status(500).json({ error: message });
       }
@@ -911,6 +1039,9 @@ function isSecureRequest(req: express.Request): boolean {
         await upsertTenantExam(req.schoolId!, ex);
         res.json({ exam: ex });
       } catch (error: unknown) {
+        if (error instanceof ValidationAppError) {
+          return res.status(error.status).json({ error: error.message });
+        }
         const message = error instanceof Error ? error.message : 'Failed to save examination.';
         res.status(500).json({ error: message });
       }
@@ -991,7 +1122,11 @@ function isSecureRequest(req: express.Request): boolean {
         );
         res.json({ marksheet: saved });
       } catch (error: unknown) {
-        if (error instanceof ConflictError || error instanceof PermissionError) {
+        if (
+          error instanceof ConflictError ||
+          error instanceof PermissionError ||
+          error instanceof ValidationAppError
+        ) {
           return res.status(error.status).json({ error: error.message });
         }
         const message = error instanceof Error ? error.message : 'Failed to save marksheet.';
@@ -1195,7 +1330,11 @@ function isSecureRequest(req: express.Request): boolean {
     requireRoles('school_admin', 'dos', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
-        const updatedSettings = req.body as SchoolSettings;
+        const parsed = parseWithSchema(schoolSettingsSchema, req.body);
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        const updatedSettings = parsed.data as SchoolSettings;
         const schoolBranding = await updateTenantSettingsAndGrading(
           req.schoolId!,
           updatedSettings
@@ -1388,8 +1527,11 @@ function isSecureRequest(req: express.Request): boolean {
     requireRoles('school_admin', 'dos', 'class_teacher', 'teacher', 'headteacher'),
     async (req: AuthRequest, res) => {
       try {
-        const { count } = req.body as { count: number };
-        await incrementTenantReportsGenerated(req.schoolId!, Number(count) || 1);
+        const parsed = parseWithSchema(trackReportsSchema, req.body ?? {});
+        if (!parsed.ok) {
+          return res.status(400).json({ error: parsed.error });
+        }
+        await incrementTenantReportsGenerated(req.schoolId!, parsed.data.count);
         res.json({ ok: true });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : 'Failed to update report count.';
@@ -1483,11 +1625,17 @@ async function startServer() {
     return;
   }
 
+  const httpServer = http.createServer(app);
+
   if (process.env.NODE_ENV !== 'production' && !process.env.NETLIFY) {
     const vitePkg = 'vite';
     const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -1504,7 +1652,7 @@ async function startServer() {
     console.error('Startup database seed warning:', err);
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`SchuleFlow multi-tenant server listening on http://0.0.0.0:${PORT}`);
   });
 }

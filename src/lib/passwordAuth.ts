@@ -14,6 +14,7 @@ export interface LocalSessionPayload {
   schoolId: string | null;
   role: UserRole;
   schoolRole: UserRole;
+  iat?: number;
   exp: number;
 }
 
@@ -102,12 +103,14 @@ export function isLocalSessionToken(token: string): boolean {
 }
 
 export function signSessionToken(
-  payload: Omit<LocalSessionPayload, 'exp'>,
+  payload: Omit<LocalSessionPayload, 'exp' | 'iat'> & { iat?: number },
   ttlMs = SESSION_TTL_MS
 ): string {
+  const issuedAt = payload.iat ?? Date.now();
   const fullPayload: LocalSessionPayload = {
     ...payload,
-    exp: Date.now() + ttlMs,
+    iat: issuedAt,
+    exp: issuedAt + ttlMs,
   };
   const encoded = Buffer.from(JSON.stringify(fullPayload), 'utf8').toString('base64url');
   const sig = createHmac('sha256', getSessionSecret()).update(encoded).digest('base64url');
@@ -163,16 +166,42 @@ export interface RecoveryTokenPayload {
   schoolId: string | null;
   purpose: RecoveryTokenPurpose;
   lookupMethod: RecoveryLookupMethod;
+  jti: string;
+  iat: number;
   exp: number;
 }
 
+const consumedRecoveryJtis = new Map<string, number>();
+
+function pruneConsumedRecoveryJtis(now: number): void {
+  if (consumedRecoveryJtis.size < 200) return;
+  for (const [jti, exp] of consumedRecoveryJtis.entries()) {
+    if (now > exp) {
+      consumedRecoveryJtis.delete(jti);
+    }
+  }
+}
+
+export function consumeRecoveryTokenJti(jti: string, exp: number): boolean {
+  const now = Date.now();
+  pruneConsumedRecoveryJtis(now);
+  if (consumedRecoveryJtis.has(jti)) {
+    return false;
+  }
+  consumedRecoveryJtis.set(jti, exp);
+  return true;
+}
+
 export function signRecoveryToken(
-  payload: Omit<RecoveryTokenPayload, 'exp'>,
+  payload: Omit<RecoveryTokenPayload, 'exp' | 'jti' | 'iat'>,
   ttlMs = RECOVERY_TTL_MS
 ): string {
+  const now = Date.now();
   const fullPayload: RecoveryTokenPayload = {
     ...payload,
-    exp: Date.now() + ttlMs,
+    jti: randomBytes(12).toString('hex'),
+    iat: now,
+    exp: now + ttlMs,
   };
   const encoded = Buffer.from(JSON.stringify(fullPayload), 'utf8').toString('base64url');
   const sig = createHmac('sha256', getSessionSecret()).update(encoded).digest('base64url');
@@ -210,11 +239,15 @@ export function verifyRecoveryToken(
       !parsed ||
       typeof parsed.email !== 'string' ||
       parsed.purpose !== expectedPurpose ||
-      typeof parsed.exp !== 'number'
+      typeof parsed.exp !== 'number' ||
+      typeof parsed.jti !== 'string'
     ) {
       return null;
     }
     if (Date.now() > parsed.exp) {
+      return null;
+    }
+    if (consumedRecoveryJtis.has(parsed.jti)) {
       return null;
     }
     return parsed;

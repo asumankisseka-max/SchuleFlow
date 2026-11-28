@@ -9,6 +9,7 @@ import { ExaminationsView } from './components/ExaminationsView';
 import { LoginView } from './components/LoginView';
 import { MarksEntryView } from './components/MarksEntryView';
 import { MarksheetsApprovalView } from './components/MarksheetsApprovalView';
+import { OfflineSyncBanner } from './components/OfflineSyncBanner';
 import { PlatformAdminView } from './components/PlatformAdminView';
 import { ReportCardsView } from './components/ReportCardsView';
 import { ResultsAnalysisView } from './components/ResultsAnalysisView';
@@ -19,6 +20,7 @@ import { SubjectsView } from './components/SubjectsView';
 import { TeachersView } from './components/TeachersView';
 import { UserManagementView } from './components/UserManagementView';
 import { useSchoolContext } from './context/SchoolContext';
+import { isNetworkOfflineError } from './lib/offlineSync';
 import { ApiError } from './utils/apiClient';
 import type {
   AssessmentComponent,
@@ -99,6 +101,13 @@ export default function App() {
     loadingWorkspace,
     workspaceError,
     recentAccounts,
+    isOnline,
+    isSyncing,
+    pendingSyncCount,
+    syncConflicts,
+    dismissSyncConflicts,
+    syncPendingMutations,
+    persistWithOfflineFallback,
     clearAuthError,
     removeRecentAccount,
     signInWithCredentials,
@@ -130,13 +139,15 @@ export default function App() {
     }
   }, [authLoading]);
 
-  // Live background sync on window focus & every 12s so DOS approvals & teacher submissions reflect immediately
+  // Live background sync on window focus & every 12s when online with clean outbox
   useEffect(() => {
     if (
       !authProfile ||
       authProfile.globalRole === 'super_admin' ||
       !activeSchoolId ||
-      subscriptionLocked
+      subscriptionLocked ||
+      !isOnline ||
+      pendingSyncCount > 0
     ) {
       return;
     }
@@ -151,7 +162,14 @@ export default function App() {
       window.removeEventListener('focus', handleFocus);
       window.clearInterval(interval);
     };
-  }, [authProfile, activeSchoolId, subscriptionLocked, refreshTenantWorkspace]);
+  }, [
+    authProfile,
+    activeSchoolId,
+    subscriptionLocked,
+    isOnline,
+    pendingSyncCount,
+    refreshTenantWorkspace,
+  ]);
 
   const currentUser: UserAccount | null = useMemo(() => {
     if (!authProfile) return null;
@@ -585,9 +603,19 @@ export default function App() {
 
   const applyMarksheetMutation = async (updated: MarksheetRecord, successMsg: string) => {
     setErrorBanner(null);
+    const dedupeKey = `marksheet:${updated.examId}:${updated.classId}:${updated.subjectId}`;
     try {
-      const res = await tenantApi.saveMarksheet(updated);
-      const saved = res.marksheet ?? updated;
+      const outcome = await persistWithOfflineFallback({
+        kind: 'saveMarksheet',
+        label: `Marksheet (${updated.subjectId.split(':').pop() ?? 'subject'})`,
+        payload: updated,
+        dedupeKey,
+        onlineCall: () => tenantApi.saveMarksheet(updated),
+      });
+      const saved =
+        outcome.result && typeof outcome.result === 'object' && 'marksheet' in outcome.result
+          ? ((outcome.result as { marksheet?: MarksheetRecord }).marksheet ?? updated)
+          : updated;
       updateLocalTenantDb((prev) => {
         const idx = prev.marksheets.findIndex(
           (m) =>
@@ -612,7 +640,11 @@ export default function App() {
             : prev.correctionRequests;
         return { ...prev, marksheets: nextSheets, correctionRequests: nextRequests };
       });
-      setNotice(successMsg);
+      setNotice(
+        outcome.queued
+          ? `${successMsg} (Saved offline — will auto-sync on reconnect)`
+          : successMsg
+      );
     } catch (err: unknown) {
       if (err instanceof ApiError && err.status === 409) {
         setErrorBanner(
@@ -826,7 +858,17 @@ export default function App() {
       ),
     }));
     setNotice('All approved marksheets published and examination locked.');
-    void runPersist(() => tenantApi.publishExam(examId), 'Failed to publish exam.');
+    void runPersist(
+      () =>
+        persistWithOfflineFallback({
+          kind: 'publishExam',
+          label: 'Publish examination',
+          payload: { examId },
+          dedupeKey: `publish:${examId}`,
+          onlineCall: () => tenantApi.publishExam(examId),
+        }),
+      'Failed to publish exam.'
+    );
   };
 
   const schoolThemeVars = buildSchoolThemeVars(
@@ -986,6 +1028,15 @@ export default function App() {
           key={activeSchoolId ?? 'default'}
           className="flex-1 p-4 sm:p-6 max-w-7xl w-full mx-auto space-y-4 print:p-0 print:max-w-none print:space-y-0"
         >
+          <OfflineSyncBanner
+            isOnline={isOnline}
+            isSyncing={isSyncing}
+            pendingCount={pendingSyncCount}
+            conflicts={syncConflicts}
+            onSyncNow={() => void syncPendingMutations()}
+            onDismissConflicts={dismissSyncConflicts}
+          />
+
           {errorBanner && (
             <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 flex items-center gap-2 no-print">
               <AlertCircle className="h-4 w-4 shrink-0" />
@@ -1034,53 +1085,102 @@ export default function App() {
               curriculumScope={effectiveCurriculumScope}
               onAddStudent={(stu: StudentProfile) => {
                 void runPersist(async () => {
-                  const res = await tenantApi.addStudents([stu]);
-                  const savedStudents = res.students.length > 0 ? res.students : [stu];
+                  const outcome = await persistWithOfflineFallback({
+                    kind: 'addStudents',
+                    label: `Register student ${stu.fullName}`,
+                    payload: [stu],
+                    onlineCall: () => tenantApi.addStudents([stu]),
+                  });
+                  const savedStudents =
+                    outcome.result && outcome.result.students.length > 0
+                      ? outcome.result.students
+                      : [stu];
                   updateLocalTenantDb((prev) => ({
                     ...prev,
                     students: [...prev.students, ...savedStudents],
                   }));
                   const created = savedStudents[0];
                   setNotice(
-                    `Registered student ${created.fullName} (${created.studentId || created.admissionNo}).`
+                    outcome.queued
+                      ? `Registered student ${created.fullName} offline (queued for sync).`
+                      : `Registered student ${created.fullName} (${created.studentId || created.admissionNo}).`
                   );
                 }, 'Failed to register student.');
               }}
               onBulkAddStudents={(list: StudentProfile[]) => {
                 void runPersist(async () => {
-                  const res = await tenantApi.addStudents(list);
-                  const savedStudents = res.students.length > 0 ? res.students : list;
+                  const outcome = await persistWithOfflineFallback({
+                    kind: 'addStudents',
+                    label: `Import ${list.length} students`,
+                    payload: list,
+                    onlineCall: () => tenantApi.addStudents(list),
+                  });
+                  const savedStudents =
+                    outcome.result && outcome.result.students.length > 0
+                      ? outcome.result.students
+                      : list;
                   updateLocalTenantDb((prev) => ({
                     ...prev,
                     students: [...prev.students, ...savedStudents],
                   }));
-                  setNotice(`Imported ${savedStudents.length} new student(s) with auto-generated IDs.`);
+                  setNotice(
+                    outcome.queued
+                      ? `Imported ${savedStudents.length} student(s) locally (queued for sync).`
+                      : `Imported ${savedStudents.length} new student(s) with auto-generated IDs.`
+                  );
                 }, 'Failed to import students.');
               }}
               onUpdateStudent={(stu: StudentProfile) => {
                 void runPersist(async () => {
-                  const res = await tenantApi.updateStudent(stu);
-                  const saved = res.student ?? stu;
+                  const outcome = await persistWithOfflineFallback({
+                    kind: 'updateStudent',
+                    label: `Update student ${stu.fullName}`,
+                    payload: stu,
+                    dedupeKey: `student:${stu.id}`,
+                    onlineCall: () => tenantApi.updateStudent(stu),
+                  });
+                  const saved = outcome.result?.student ?? stu;
                   updateLocalTenantDb((prev) => ({
                     ...prev,
                     students: prev.students.map((s) => (s.id === saved.id ? saved : s)),
                   }));
-                  setNotice(`Updated record for ${saved.fullName}.`);
+                  setNotice(
+                    outcome.queued
+                      ? `Saved ${saved.fullName} offline (queued for sync).`
+                      : `Updated record for ${saved.fullName}.`
+                  );
                 }, 'Failed to update student.');
               }}
               onDeleteStudent={(studentId: string) => {
                 void runPersist(async () => {
-                  await tenantApi.deleteStudent(studentId);
+                  const outcome = await persistWithOfflineFallback({
+                    kind: 'deleteStudent',
+                    label: 'Delete student',
+                    payload: { studentId },
+                    dedupeKey: `del_student:${studentId}`,
+                    onlineCall: () => tenantApi.deleteStudent(studentId),
+                  });
                   updateLocalTenantDb((prev) => ({
                     ...prev,
                     students: prev.students.filter((s) => s.id !== studentId),
                   }));
-                  setNotice('Student removed from directory.');
+                  setNotice(
+                    outcome.queued
+                      ? 'Student removed offline (queued for sync).'
+                      : 'Student removed from directory.'
+                  );
                 }, 'Failed to delete student.');
               }}
               onUploadStudentPhoto={async (studentId: string, dataUrl: string) => {
-                const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
-                return res.url;
+                try {
+                  const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
+                  return res.url;
+                } catch (err) {
+                  if (isNetworkOfflineError(err)) {
+                    return dataUrl;
+                  }
+                  throw err;
+                }
               }}
               onBulkPromote={(ids, options) => {
                 updateLocalTenantDb((prev) => ({
@@ -1119,7 +1219,13 @@ export default function App() {
                     : `Promoted/transferred ${ids.length} student(s)${targetClsName ? ` to ${targetClsName}` : ''}.`
                 );
                 void runPersist(
-                  () => tenantApi.promoteStudents(ids, options),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'promoteStudents',
+                      label: `Promote ${ids.length} students`,
+                      payload: { studentIds: ids, options },
+                      onlineCall: () => tenantApi.promoteStudents(ids, options),
+                    }),
                   'Failed to promote students.'
                 );
               }}
@@ -1156,7 +1262,14 @@ export default function App() {
                 }));
                 setNotice(`Added class ${cls.name}.`);
                 void runPersist(
-                  () => tenantApi.saveClass(cls, activeExam?.id),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveClass',
+                      label: `Add class ${cls.name}`,
+                      payload: { cls, attachToExamId: activeExam?.id },
+                      dedupeKey: `class:${cls.id}`,
+                      onlineCall: () => tenantApi.saveClass(cls, activeExam?.id),
+                    }),
                   'Failed to save class.'
                 );
               }}
@@ -1165,7 +1278,17 @@ export default function App() {
                   ...prev,
                   classes: prev.classes.map((c) => (c.id === cls.id ? cls : c)),
                 }));
-                void runPersist(() => tenantApi.saveClass(cls), 'Failed to update class.');
+                void runPersist(
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveClass',
+                      label: `Update class ${cls.name}`,
+                      payload: { cls },
+                      dedupeKey: `class:${cls.id}`,
+                      onlineCall: () => tenantApi.saveClass(cls),
+                    }),
+                  'Failed to update class.'
+                );
               }}
               onArchiveOrDeleteClass={(classId, mode) => {
                 void runPersist(async () => {
@@ -1195,7 +1318,14 @@ export default function App() {
                 }));
                 setNotice(`Added combination ${combo.code}.`);
                 void runPersist(
-                  () => tenantApi.saveCombination(combo),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveCombination',
+                      label: `Save combination ${combo.code}`,
+                      payload: combo,
+                      dedupeKey: `combo:${combo.id}`,
+                      onlineCall: () => tenantApi.saveCombination(combo),
+                    }),
                   'Failed to save combination.'
                 );
               }}
@@ -1220,7 +1350,17 @@ export default function App() {
               onAddSubject={(sub: SubjectDefinition) => {
                 updateLocalTenantDb((prev) => ({ ...prev, subjects: [...prev.subjects, sub] }));
                 setNotice(`Added subject ${sub.name} (${sub.code}).`);
-                void runPersist(() => tenantApi.saveSubject(sub), 'Failed to save subject.');
+                void runPersist(
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveSubject',
+                      label: `Add subject ${sub.name}`,
+                      payload: sub,
+                      dedupeKey: `subject:${sub.id}`,
+                      onlineCall: () => tenantApi.saveSubject(sub),
+                    }),
+                  'Failed to save subject.'
+                );
               }}
               onUpdateSubject={(sub: SubjectDefinition) => {
                 updateLocalTenantDb((prev) => ({
@@ -1228,7 +1368,17 @@ export default function App() {
                   subjects: prev.subjects.map((s) => (s.id === sub.id ? sub : s)),
                 }));
                 setNotice(`Updated subject ${sub.name}.`);
-                void runPersist(() => tenantApi.saveSubject(sub), 'Failed to update subject.');
+                void runPersist(
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveSubject',
+                      label: `Update subject ${sub.name}`,
+                      payload: sub,
+                      dedupeKey: `subject:${sub.id}`,
+                      onlineCall: () => tenantApi.saveSubject(sub),
+                    }),
+                  'Failed to update subject.'
+                );
               }}
               onArchiveOrDeleteSubject={(subjectId, mode) => {
                 void runPersist(async () => {
@@ -1278,7 +1428,17 @@ export default function App() {
               onAddExam={(ex: ExaminationPeriod) => {
                 updateLocalTenantDb((prev) => ({ ...prev, exams: [...prev.exams, ex] }));
                 setNotice(`Created examination period "${ex.name}".`);
-                void runPersist(() => tenantApi.saveExam(ex), 'Failed to create examination.');
+                void runPersist(
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveExam',
+                      label: `Create exam ${ex.name}`,
+                      payload: ex,
+                      dedupeKey: `exam:${ex.id}`,
+                      onlineCall: () => tenantApi.saveExam(ex),
+                    }),
+                  'Failed to create examination.'
+                );
               }}
               onUpdateExam={(ex: ExaminationPeriod) => {
                 updateLocalTenantDb((prev) => ({
@@ -1286,7 +1446,17 @@ export default function App() {
                   exams: prev.exams.map((item) => (item.id === ex.id ? ex : item)),
                 }));
                 setNotice(`Updated "${ex.name}".`);
-                void runPersist(() => tenantApi.saveExam(ex), 'Failed to update examination.');
+                void runPersist(
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveExam',
+                      label: `Update exam ${ex.name}`,
+                      payload: ex,
+                      dedupeKey: `exam:${ex.id}`,
+                      onlineCall: () => tenantApi.saveExam(ex),
+                    }),
+                  'Failed to update examination.'
+                );
               }}
               onArchiveOrDeleteExam={(examId, mode) => {
                 void runPersist(async () => {
@@ -1394,7 +1564,14 @@ export default function App() {
                   logoUrl: resolvedLogo,
                 }));
                 void runPersist(
-                  () => tenantApi.saveSettings(synced),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveSettings',
+                      label: 'Update report layout',
+                      payload: synced,
+                      dedupeKey: 'settings',
+                      onlineCall: () => tenantApi.saveSettings(synced),
+                    }),
                   'Failed to save report card template.'
                 );
               }}
@@ -1411,7 +1588,14 @@ export default function App() {
                   },
                 }));
                 void runPersist(
-                  () => tenantApi.saveRemark(examId, studentId, field, value),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveRemark',
+                      label: `Student remark (${field})`,
+                      payload: { examId, studentId, field, value },
+                      dedupeKey: `remark:${examId}:${studentId}:${field}`,
+                      onlineCall: () => tenantApi.saveRemark(examId, studentId, field, value),
+                    }),
                   'Failed to save student remark.'
                 );
               }}
@@ -1424,17 +1608,38 @@ export default function App() {
                   students: prev.students.map((s) => (s.id === studentId ? updatedStu : s)),
                 }));
                 void runPersist(
-                  () => tenantApi.updateStudent(updatedStu),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'updateStudent',
+                      label: `Update photo for ${target.fullName}`,
+                      payload: updatedStu,
+                      dedupeKey: `student:${updatedStu.id}`,
+                      onlineCall: () => tenantApi.updateStudent(updatedStu),
+                    }),
                   'Failed to save student photo.'
                 );
               }}
               onUploadStudentPhoto={async (studentId, dataUrl) => {
-                const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
-                return res.url;
+                try {
+                  const res = await tenantApi.uploadMedia('students', dataUrl, studentId);
+                  return res.url;
+                } catch (err) {
+                  if (isNetworkOfflineError(err)) {
+                    return dataUrl;
+                  }
+                  throw err;
+                }
               }}
               onUploadSchoolLogo={async (dataUrl) => {
-                const res = await tenantApi.uploadMedia('logos', dataUrl, 'school-logo');
-                return res.url;
+                try {
+                  const res = await tenantApi.uploadMedia('logos', dataUrl, 'school-logo');
+                  return res.url;
+                } catch (err) {
+                  if (isNetworkOfflineError(err)) {
+                    return dataUrl;
+                  }
+                  throw err;
+                }
               }}
               onIncrementReportsPrinted={(count) => {
                 updateLocalTenantDb((prev) => ({
@@ -1520,7 +1725,14 @@ export default function App() {
                 }));
                 setNotice('School profile, badge, uniform colors & grading rules saved.');
                 void runPersist(
-                  () => tenantApi.saveSettings(normalizedSettings),
+                  () =>
+                    persistWithOfflineFallback({
+                      kind: 'saveSettings',
+                      label: 'Update school settings',
+                      payload: normalizedSettings,
+                      dedupeKey: 'settings',
+                      onlineCall: () => tenantApi.saveSettings(normalizedSettings),
+                    }),
                   'Failed to save school configuration.'
                 );
               }}

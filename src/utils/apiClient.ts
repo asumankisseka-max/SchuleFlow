@@ -53,6 +53,7 @@ async function requestJson<T>(
   const token = await tokenProvider();
   const headers = new Headers(options.headers);
   headers.set('Content-Type', 'application/json');
+  headers.set('X-Requested-With', 'SchuleFlow-Client');
 
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
@@ -219,6 +220,13 @@ export const platformApi = {
     requestJson<{ invoice: SubscriptionInvoice }>(
       `/api/v1/platform/schools/${encodeURIComponent(targetSchoolId)}/invoices/generate`,
       { method: 'POST' },
+      null
+    ),
+
+  resetToBaseline: (confirmText: string) =>
+    requestJson<{ ok: boolean; schoolId: string; schoolCode: string; schoolName: string }>(
+      '/api/v1/platform/reset-baseline',
+      { method: 'POST', body: JSON.stringify({ confirmText }) },
       null
     ),
 

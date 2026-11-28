@@ -8,6 +8,10 @@ import { deleteSchoolTenant } from '../src/db/repository.ts';
 import { users } from '../src/db/schema.ts';
 import { ensureInitialTenantsSeeded, provisionNewSchoolTenant } from '../src/db/seed.ts';
 import { hashPassword } from '../src/lib/passwordAuth.ts';
+import {
+  isSupabaseStorageConfigured,
+  uploadMediaToSupabase,
+} from '../src/lib/supabaseStorage.ts';
 
 process.env.TEST_MODE = 'true';
 process.env.DISABLE_RATE_LIMIT = 'true';
@@ -440,8 +444,8 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     assert.ok(changeRes.data.token);
     assert.equal(changeRes.data.user.mustChangePassword, false);
 
-    // Verify new password signs in cleanly without mustChangePassword flag
-    const finalLogin = await apiJson<{ user: { mustChangePassword?: boolean } }>(
+    // Verify new password signs in cleanly without mustChangePassword flag (and update teacherAToken since reset revoked prior sessions)
+    const finalLogin = await apiJson<{ token: string; user: { mustChangePassword?: boolean } }>(
       '/api/v1/auth/login',
       {
         method: 'POST',
@@ -455,6 +459,7 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     );
     assert.equal(finalLogin.status, 200);
     assert.equal(finalLogin.data.user.mustChangePassword, false);
+    teacherAToken = finalLogin.data.token;
   });
 
   it('exposes Supabase media storage status & upload fallback endpoint', async () => {
@@ -481,6 +486,76 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     );
     assert.equal(uploadRes.status, 201);
     assert.ok(uploadRes.data.url.length > 10);
+
+    // Verify interactive upload gracefully falls back to inline storage on Supabase RLS rejection
+    const mockRlsClient = {
+      storage: {
+        listBuckets: async () => ({ data: [{ name: 'schuleflow-media' }], error: null }),
+        createBucket: async () => ({ error: null }),
+        from: () => ({
+          upload: async () => ({
+            data: null,
+            error: { message: 'new row violates row-level security policy' },
+          }),
+          getPublicUrl: () => ({ data: { publicUrl: '' } }),
+        }),
+      },
+    } as unknown as Parameters<typeof uploadMediaToSupabase>[0]['supabaseClientOverride'];
+
+    const rlsFallback = await uploadMediaToSupabase({
+      schoolId: schoolAId,
+      folder: 'logos',
+      entityId: 'school-logo',
+      dataUrl: samplePngDataUrl,
+      supabaseClientOverride: mockRlsClient,
+    });
+    assert.equal(rlsFallback.storage, 'inline');
+    assert.equal(rlsFallback.url, samplePngDataUrl);
+
+    await assert.rejects(
+      () =>
+        uploadMediaToSupabase({
+          schoolId: schoolAId,
+          folder: 'logos',
+          entityId: 'school-logo',
+          dataUrl: samplePngDataUrl,
+          strictSupabase: true,
+          supabaseClientOverride: mockRlsClient,
+        }),
+      /Row-Level Security \(RLS\)/i
+    );
+
+    // Verify anon JWT is not misclassified as configured service_role storage
+    const prevSupaUrl = process.env.SUPABASE_URL;
+    const prevServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const fakeAnonHeader = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString(
+      'base64url'
+    );
+    const fakeAnonPayload = Buffer.from(JSON.stringify({ role: 'anon' })).toString('base64url');
+    process.env.SUPABASE_URL = 'https://example.supabase.co';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = `${fakeAnonHeader}.${fakeAnonPayload}.sig`;
+    try {
+      assert.equal(isSupabaseStorageConfigured().configured, false);
+      const anonUpload = await apiJson<{ url: string; storage: string }>(
+        `/api/v1/schools/${schoolAId}/media/upload`,
+        {
+          method: 'POST',
+          token: adminAToken,
+          body: {
+            folder: 'logos',
+            entityId: 'school-logo',
+            dataUrl: samplePngDataUrl,
+          },
+        }
+      );
+      assert.equal(anonUpload.status, 201);
+      assert.equal(anonUpload.data.storage, 'inline');
+    } finally {
+      if (prevSupaUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevSupaUrl;
+      if (prevServiceKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = prevServiceKey;
+    }
   });
 
   it('automatically separates Super Admin from schools via credentials and enforces strict isolation & disambiguation', async () => {
@@ -536,6 +611,20 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
       token: adminAToken,
     });
     assert.equal(schoolBlockedFromPlatform.status, 403);
+
+    const schoolBlockedFromReset = await apiJson('/api/v1/platform/reset-baseline', {
+      method: 'POST',
+      token: adminAToken,
+      body: { confirmText: 'RESET' },
+    });
+    assert.equal(schoolBlockedFromReset.status, 403);
+
+    const invalidResetConfirm = await apiJson('/api/v1/platform/reset-baseline', {
+      method: 'POST',
+      token: saLogin.data.token,
+      body: { confirmText: 'NOPE' },
+    });
+    assert.equal(invalidResetConfirm.status, 400);
 
     // 2. Unknown identifier & wrong password return uniform 401
     const unknownRes = await apiJson<{ error: string }>('/api/v1/auth/login', {
@@ -1100,5 +1189,380 @@ describe('Multi-Tenant Security, RBAC, Optimistic Locking & Archival API Integra
     assert.equal(graduatedStu2.status, 'inactive');
     assert.equal(graduatedStu2.academicYear, '2027');
   });
+
+  it('blocks CSRF cross-origin requests, enforces server-side session revocation on logout & password change, and rejects recovery token replay', async () => {
+    // 1. Cross-origin state-changing request must be rejected with 403 + nosniff header present
+    const csrfCrossOrigin = await fetch(`${baseUrl}/api/v1/schools/${schoolAId}/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminAToken}`,
+        Origin: 'https://attacker.example',
+      },
+      body: JSON.stringify({ schoolName: 'Hijacked School' }),
+    });
+    assert.equal(csrfCrossOrigin.status, 403);
+    assert.equal(csrfCrossOrigin.headers.get('x-content-type-options'), 'nosniff');
+
+    // Cookie-only mutation without Origin or X-Requested-With is blocked with 403
+    const csrfCookieOnly = await fetch(`${baseUrl}/api/v1/schools/${schoolAId}/settings`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Cookie: `sf_session=${adminAToken}`,
+      },
+      body: JSON.stringify({ schoolName: 'Cookie Hijack' }),
+    });
+    assert.equal(csrfCookieOnly.status, 403);
+
+    // 2. Session revocation on logout + password change (using a dedicated temporary staff account)
+    const revStaffId = `${schoolAId}:usr-rev-test`;
+    const createRevStaff = await apiJson<{ staff: { staffId: string } }>(
+      `/api/v1/schools/${schoolAId}/staff`,
+      {
+        method: 'PUT',
+        token: adminAToken,
+        body: {
+          id: revStaffId,
+          name: 'Revocation Test Teacher',
+          email: `rev-${stamp}@tha.ac.ug`,
+          username: `rev_${stamp}`,
+          password: 'InitPass2026!',
+          role: 'teacher',
+          active: true,
+          phone: '+256 772 616161',
+          assignedClassIds: [classAId],
+          assignedSubjectIds: [subjectAId],
+        },
+      }
+    );
+    assert.equal(createRevStaff.status, 200);
+
+    const revLogin1 = await apiJson<{ token: string }>('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        schoolCode: schoolACode,
+        identifier: createRevStaff.data.staff.staffId,
+        password: 'InitPass2026!',
+      },
+    });
+    assert.equal(revLogin1.status, 200);
+    const token1 = revLogin1.data.token;
+
+    await new Promise((r) => setTimeout(r, 15));
+    const logoutRes = await apiJson('/api/v1/auth/logout', {
+      method: 'POST',
+      token: token1,
+    });
+    assert.equal(logoutRes.status, 200);
+
+    // Token1 must be rejected immediately after logout
+    const afterLogoutSync = await apiJson('/api/v1/auth/sync', {
+      method: 'POST',
+      token: token1,
+    });
+    assert.equal(afterLogoutSync.status, 401);
+
+    // Log in again and change password -> old token invalid, new token valid
+    const revLogin2 = await apiJson<{ token: string }>('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        schoolCode: schoolACode,
+        identifier: createRevStaff.data.staff.staffId,
+        password: 'InitPass2026!',
+      },
+    });
+    assert.equal(revLogin2.status, 200);
+    const oldToken = revLogin2.data.token;
+
+    await new Promise((r) => setTimeout(r, 15));
+    const changePwdRes = await apiJson<{ token: string }>('/api/v1/auth/change-password', {
+      method: 'POST',
+      token: oldToken,
+      body: {
+        currentPassword: 'InitPass2026!',
+        newPassword: 'UpdatedPass2026!',
+      },
+    });
+    assert.equal(changePwdRes.status, 200);
+    const newToken = changePwdRes.data.token;
+    assert.ok(newToken);
+
+    const staleTokenCheck = await apiJson('/api/v1/auth/sync', {
+      method: 'POST',
+      token: oldToken,
+    });
+    assert.equal(staleTokenCheck.status, 401);
+
+    const freshTokenCheck = await apiJson('/api/v1/auth/sync', {
+      method: 'POST',
+      token: newToken,
+    });
+    assert.equal(freshTokenCheck.status, 200);
+
+    // 3. Recovery verification blocks weak 4-digit phone suffix, succeeds on full registered phone, and resetToken is single-use
+    const lookupRes = await apiJson<{ recoveryToken: string }>('/api/v1/auth/recover/lookup', {
+      method: 'POST',
+      body: {
+        schoolCode: schoolACode,
+        identifier: createRevStaff.data.staff.staffId,
+      },
+    });
+    assert.equal(lookupRes.status, 200);
+
+    const weakSuffixVerify = await apiJson('/api/v1/auth/recover/verify', {
+      method: 'POST',
+      body: {
+        recoveryToken: lookupRes.data.recoveryToken,
+        verification: '6161',
+      },
+    });
+    assert.equal(weakSuffixVerify.status, 401);
+
+    const verifyRes = await apiJson<{ resetToken: string }>('/api/v1/auth/recover/verify', {
+      method: 'POST',
+      body: {
+        recoveryToken: lookupRes.data.recoveryToken,
+        verification: '+256 772 616161',
+      },
+    });
+    assert.equal(verifyRes.status, 200);
+
+    const firstReset = await apiJson('/api/v1/auth/recover/reset-password', {
+      method: 'POST',
+      body: {
+        resetToken: verifyRes.data.resetToken,
+        newPassword: 'RecoveredOnce2026!',
+      },
+    });
+    assert.equal(firstReset.status, 200);
+
+    const replayReset = await apiJson('/api/v1/auth/recover/reset-password', {
+      method: 'POST',
+      body: {
+        resetToken: verifyRes.data.resetToken,
+        newPassword: 'HijackedAgain2026!',
+      },
+    });
+    assert.equal(replayReset.status, 401);
+  });
+
+  it('rejects cross-tenant foreign IDs and invalid payloads via strict Zod schemas & DB scoping', async () => {
+    // Super Admin cannot inspect internal school bootstrap directly (403); use School B Admin to fetch School B IDs
+    const [saLogin, adminBLogin] = await Promise.all([
+      apiJson<{ token: string }>('/api/v1/auth/login', {
+        method: 'POST',
+        body: {
+          identifier: superAdminEmail,
+          password: 'SuperAdminPass2026!',
+        },
+      }),
+      apiJson<{ token: string }>('/api/v1/auth/login', {
+        method: 'POST',
+        body: {
+          schoolCode: schoolBCode,
+          identifier: `admin-${stamp}@tnc.ac.ug`,
+          password: 'BetaPass2026!',
+        },
+      }),
+    ]);
+    assert.equal(saLogin.status, 200);
+    assert.equal(adminBLogin.status, 200);
+
+    const saCrossBoot = await apiJson(`/api/v1/schools/${schoolBId}/bootstrap`, {
+      token: saLogin.data.token,
+    });
+    assert.equal(saCrossBoot.status, 403);
+
+    const bootB = await apiJson<{
+      db: { exams: Array<{ id: string }>; classes: Array<{ id: string }>; subjects: Array<{ id: string }> };
+    }>(`/api/v1/schools/${schoolBId}/bootstrap`, { token: adminBLogin.data.token });
+    assert.equal(bootB.status, 200);
+    const schoolBClassId = bootB.data.db.classes[0].id;
+    const schoolBExamId = bootB.data.db.exams[0].id;
+    const schoolBSubjectId = bootB.data.db.subjects[0].id;
+
+    // 1. Admin A tries to save a marksheet referencing School B's class/exam -> 400
+    const crossFkMarksheet = await apiJson(`/api/v1/schools/${schoolAId}/marksheets`, {
+      method: 'POST',
+      token: adminAToken,
+      body: {
+        id: `${schoolAId}:ms-cross-fk`,
+        examId: schoolBExamId,
+        classId: schoolBClassId,
+        subjectId: schoolBSubjectId,
+        teacherId: teacherAId,
+        status: 'draft',
+        entries: {},
+        lastModified: new Date().toISOString(),
+        auditHistory: [],
+      },
+    });
+    assert.equal(crossFkMarksheet.status, 400);
+
+    // 2. Admin A tries to register a student with School B's classId -> 400
+    const crossFkStudent = await apiJson(`/api/v1/schools/${schoolAId}/students`, {
+      method: 'POST',
+      token: adminAToken,
+      body: {
+        students: [
+          {
+            id: `${schoolAId}:stu-cross-fk`,
+            admissionNo: 'FK-01',
+            fullName: 'Cross Tenant Student',
+            gender: 'F',
+            classId: schoolBClassId,
+            academicYear: '2026',
+            status: 'active',
+          },
+        ],
+      },
+    });
+    assert.equal(crossFkStudent.status, 400);
+
+    // 3. Invalid negative report count -> 400
+    const invalidTrack = await apiJson(`/api/v1/schools/${schoolAId}/reports/track`, {
+      method: 'POST',
+      token: adminAToken,
+      body: { count: -10 },
+    });
+    assert.equal(invalidTrack.status, 400);
+
+    // 4. Invalid settings schoolName (empty string) -> 400
+    const invalidSettings = await apiJson(`/api/v1/schools/${schoolAId}/settings`, {
+      method: 'PUT',
+      token: adminAToken,
+      body: { schoolName: '' },
+    });
+    assert.equal(invalidSettings.status, 400);
+  });
+
+  it('handles 1,000 concurrent multi-school entries simultaneously without data loss or cross-tenant leakage', async () => {
+    const saLogin = await apiJson<{ token: string }>('/api/v1/auth/login', {
+      method: 'POST',
+      body: {
+        identifier: superAdminEmail,
+        password: 'SuperAdminPass2026!',
+      },
+    });
+    assert.equal(saLogin.status, 200);
+    const saToken = saLogin.data.token;
+
+    // Raise quotas for high-volume benchmark across both schools
+    const [qA, qB, adminBLogin] = await Promise.all([
+      apiJson(`/api/v1/platform/schools/${schoolAId}`, {
+        method: 'PATCH',
+        token: saToken,
+        body: { studentQuota: 2000 },
+      }),
+      apiJson(`/api/v1/platform/schools/${schoolBId}`, {
+        method: 'PATCH',
+        token: saToken,
+        body: { studentQuota: 2000 },
+      }),
+      apiJson<{ token: string }>('/api/v1/auth/login', {
+        method: 'POST',
+        body: {
+          schoolCode: schoolBCode,
+          identifier: `admin-${stamp}@tnc.ac.ug`,
+          password: 'BetaPass2026!',
+        },
+      }),
+    ]);
+    assert.equal(qA.status, 200);
+    assert.equal(qB.status, 200);
+    assert.equal(adminBLogin.status, 200);
+    const adminBToken = adminBLogin.data.token;
+
+    const bootB = await apiJson<{ db: { classes: Array<{ id: string }> } }>(
+      `/api/v1/schools/${schoolBId}/bootstrap`,
+      { token: adminBToken }
+    );
+    assert.equal(bootB.status, 200);
+    const classBId = bootB.data.db.classes[0].id;
+
+    // Dispatch 1,000 student entries concurrently across School A (500) and School B (500) in parallel waves
+    const totalPerSchool = 500;
+    const waveSize = 100; // 100 concurrent HTTP requests at a time across both schools
+    const statuses: number[] = [];
+
+    for (let offset = 0; offset < totalPerSchool; offset += waveSize) {
+      const wavePromises: Array<Promise<{ status: number }>> = [];
+      for (let i = 0; i < waveSize; i++) {
+        const idx = offset + i;
+        wavePromises.push(
+          apiJson(`/api/v1/schools/${schoolAId}/students`, {
+            method: 'POST',
+            token: adminAToken,
+            body: {
+              students: [
+                {
+                  id: `${schoolAId}:stu-scale-a-${idx}`,
+                  admissionNo: `SCALE-A-${idx}`,
+                  fullName: `Scale Student A ${idx}`,
+                  gender: idx % 2 === 0 ? 'F' : 'M',
+                  classId: classAId,
+                  academicYear: '2026',
+                  status: 'active',
+                },
+              ],
+            },
+          })
+        );
+        wavePromises.push(
+          apiJson(`/api/v1/schools/${schoolBId}/students`, {
+            method: 'POST',
+            token: adminBToken,
+            body: {
+              students: [
+                {
+                  id: `${schoolBId}:stu-scale-b-${idx}`,
+                  admissionNo: `SCALE-B-${idx}`,
+                  fullName: `Scale Student B ${idx}`,
+                  gender: idx % 2 === 0 ? 'M' : 'F',
+                  classId: classBId,
+                  academicYear: '2026',
+                  status: 'active',
+                },
+              ],
+            },
+          })
+        );
+      }
+      const waveResults = await Promise.all(wavePromises);
+      for (const r of waveResults) {
+        statuses.push(r.status);
+      }
+    }
+
+    assert.equal(statuses.length, 1000);
+    const failedCount = statuses.filter((s) => s !== 200 && s !== 201).length;
+    assert.equal(failedCount, 0);
+
+    // Verify exact tenant counts and zero cross-tenant leakage
+    const [listA, listB] = await Promise.all([
+      apiJson<{ total: number; students: Array<{ id: string }> }>(
+        `/api/v1/schools/${schoolAId}/students?limit=20&search=SCALE-`,
+        { token: adminAToken }
+      ),
+      apiJson<{ total: number; students: Array<{ id: string }> }>(
+        `/api/v1/schools/${schoolBId}/students?limit=20&search=SCALE-`,
+        { token: adminBToken }
+      ),
+    ]);
+    assert.equal(listA.status, 200);
+    assert.equal(listB.status, 200);
+    assert.equal(listA.data.total, 500);
+    assert.equal(listB.data.total, 500);
+    assert.equal(
+      listA.data.students.some((s) => s.id.startsWith(`${schoolBId}:`)),
+      false
+    );
+    assert.equal(
+      listB.data.students.some((s) => s.id.startsWith(`${schoolAId}:`)),
+      false
+    );
+  });
 });
+
 

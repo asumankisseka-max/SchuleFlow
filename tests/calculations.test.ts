@@ -14,6 +14,7 @@ import {
   computeCbcIdentifier,
   filterStudentsOfferingSubject,
   getMarksheetMissingBreakdown,
+  getReportCardVisibleAssessments,
   resolveGrade,
   validateMarksheetRecord,
 } from '../src/utils/calculations.ts';
@@ -464,5 +465,148 @@ describe('Uganda O-Level CBC & A-Level UACE Calculation Engine', () => {
     assert.equal(summary.missingCount, 1);
     assert.equal(summary.issues.some((i) => i.studentId === 'stu-al2' && i.field === 'U1' && i.type === 'out_of_range'), true);
     assert.equal(summary.issues.some((i) => i.studentId === 'stu-al1' && i.field === 'EoT Mark' && i.type === 'missing'), true);
+  });
+
+  it('shows only assessments actually made on O-Level and A-Level report cards', () => {
+    const settings = makeSettings();
+    const olevelExamClass: ExamClass = {
+      id: 'ex:s1-vis',
+      examId: 'ex-vis',
+      classId: 'cls-s1-vis',
+      className: 'S.1',
+      level: 'olevel',
+      examTitle: 'Term Test',
+      classTeacher: 'Teacher X',
+      examDate: '2026-11-12',
+      lastModified: '2026-11-12T00:00:00.000Z',
+      subjects: [
+        { id: 'sub-math', code: 'MTC', name: 'Mathematics', category: 'compulsory', maxMarks: 100, passMark: 50 },
+        { id: 'sub-eng', code: 'ENG', name: 'English', category: 'compulsory', maxMarks: 100, passMark: 50 },
+      ],
+      students: [
+        {
+          id: 'stu-u1-eot',
+          admissionNo: 'U1',
+          name: 'U1 And EoT Only',
+          gender: 'F',
+          marks: {},
+          cbcMarks: {
+            'sub-math': { u1: '2.6', u2: '', u3: '', eot: '76' },
+            'sub-eng': { u1: '2.4', u2: '', u3: '', eot: '70' },
+          },
+        },
+        {
+          id: 'stu-eot-only',
+          admissionNo: 'U2',
+          name: 'EoT Only Student',
+          gender: 'M',
+          marks: {},
+          cbcMarks: {
+            'sub-math': { u1: '', u2: '', u3: '', eot: '82' },
+            'sub-eng': { u1: '', u2: '', u3: '', eot: '68' },
+          },
+        },
+        {
+          id: 'stu-u1-u2',
+          admissionNo: 'U3',
+          name: 'U1 And U2 Only',
+          gender: 'F',
+          marks: {},
+          cbcMarks: {
+            'sub-math': { u1: '2.5', u2: '2.8', u3: '', eot: '' },
+            'sub-eng': { u1: '2.0', u2: '2.2', u3: '', eot: '' },
+          },
+        },
+      ],
+    };
+
+    const oSummary = calculateClassPerformance(olevelExamClass, settings);
+    const visU1Eot = getReportCardVisibleAssessments(
+      olevelExamClass.subjects,
+      oSummary.studentResults.find((r) => r.studentId === 'stu-u1-eot')!,
+      'olevel',
+      settings.cbcConfig
+    );
+    assert.deepEqual(visU1Eot, {
+      showU1: true,
+      showU2: false,
+      showU3: false,
+      showAoiSummary: true,
+      showEot: true,
+    });
+
+    const visEotOnly = getReportCardVisibleAssessments(
+      olevelExamClass.subjects,
+      oSummary.studentResults.find((r) => r.studentId === 'stu-eot-only')!,
+      'olevel',
+      settings.cbcConfig
+    );
+    assert.deepEqual(visEotOnly, {
+      showU1: false,
+      showU2: false,
+      showU3: false,
+      showAoiSummary: false,
+      showEot: true,
+    });
+
+    const visU1U2 = getReportCardVisibleAssessments(
+      olevelExamClass.subjects,
+      oSummary.studentResults.find((r) => r.studentId === 'stu-u1-u2')!,
+      'olevel',
+      settings.cbcConfig
+    );
+    assert.deepEqual(visU1U2, {
+      showU1: true,
+      showU2: true,
+      showU3: false,
+      showAoiSummary: true,
+      showEot: false,
+    });
+
+    // A'Level with U1 + EoT recorded in entryMap
+    const alevelExamClass: ExamClass = {
+      id: 'ex:s5-vis',
+      examId: 'ex-vis',
+      classId: 'cls-s5-vis',
+      className: 'S.5',
+      level: 'alevel',
+      examTitle: 'End of Term',
+      classTeacher: 'Teacher Y',
+      examDate: '2026-11-12',
+      lastModified: '2026-11-12T00:00:00.000Z',
+      subjects: [
+        { id: 'sub-phy', code: 'PHY', name: 'Physics', category: 'principal', maxMarks: 100, passMark: 50 },
+      ],
+      students: [
+        {
+          id: 'stu-a1',
+          admissionNo: 'A1',
+          name: 'A-Level U1+EoT',
+          gender: 'M',
+          marks: { 'sub-phy': '84' },
+        },
+      ],
+    };
+    const entryMap: Record<string, Record<string, MarkEntryItem>> = {
+      'stu-a1': {
+        'sub-phy': { u1: '78', eot: '84', mark: '84' },
+      },
+    };
+    const aSummary = calculateClassPerformance(alevelExamClass, settings, entryMap);
+    const visALevel = getReportCardVisibleAssessments(
+      alevelExamClass.subjects,
+      aSummary.studentResults[0],
+      'alevel',
+      settings.cbcConfig
+    );
+    assert.deepEqual(visALevel, {
+      showU1: true,
+      showU2: false,
+      showU3: false,
+      showAoiSummary: false,
+      showEot: true,
+    });
+    assert.equal(aSummary.studentResults[0].subjectResults['sub-phy'].u1, 78);
+    assert.equal(aSummary.studentResults[0].subjectResults['sub-phy'].eotScore, 84);
   });
 });

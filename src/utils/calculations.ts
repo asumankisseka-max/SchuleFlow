@@ -1,4 +1,5 @@
 import type {
+  CbcConfig,
   ClassPerformanceSummary,
   EducationLevel,
   ExamClass,
@@ -828,6 +829,14 @@ export function calculateClassPerformance(
           validSubjectPercents.push({ id: subject.id, name: subject.name, pct });
         }
 
+        const aU1 = parseClampedNumber(metaEntry?.u1, subject.maxMarks);
+        const aU2 = parseClampedNumber(metaEntry?.u2, subject.maxMarks);
+        const aU3 = parseClampedNumber(metaEntry?.u3, subject.maxMarks);
+        const aEot = parseClampedNumber(
+          metaEntry?.eot ?? metaEntry?.mark ?? rawValue,
+          subject.maxMarks
+        );
+
         subjectResults[subject.id] = {
           subjectId: subject.id,
           category: subject.category,
@@ -842,13 +851,13 @@ export function calculateClassPerformance(
           exempted: false,
           missed: false,
           competencyObservation,
-          u1: null,
-          u2: null,
-          u3: null,
+          u1: aU1,
+          u2: aU2,
+          u3: aU3,
           aoiAverage: null,
           aoiScore20: null,
           identifier: null,
-          eotScore: null,
+          eotScore: aEot ?? numericValue,
           eotScore80: null,
         };
       }
@@ -1202,4 +1211,61 @@ export function getStudentAcademicHistory(
   }
 
   return points;
+}
+
+export interface ReportCardVisibleAssessments {
+  showU1: boolean;
+  showU2: boolean;
+  showU3: boolean;
+  showAoiSummary: boolean;
+  showEot: boolean;
+}
+
+/**
+ * Determines which assessment columns actually have recorded scores for a report card
+ * so report cards only show assessments made (e.g. U1 + EoT only when U2/U3 were not assessed).
+ */
+export function getReportCardVisibleAssessments(
+  subjects: Array<{ id: string }>,
+  studentResult: StudentCalculatedResult,
+  level: EducationLevel,
+  cbc: CbcConfig
+): ReportCardVisibleAssessments {
+  const isSingleAoi = level === 'olevel' && cbc.aoiInputMode === 'single_aoi';
+  let showU1 = false;
+  let showU2 = false;
+  let showU3 = false;
+  let showEot = false;
+
+  for (const sub of subjects) {
+    const cell = studentResult.subjectResults[sub.id];
+    if (!cell) continue;
+    if (cell.u1 !== null && cell.u1 !== undefined) showU1 = true;
+    if (!isSingleAoi && cell.u2 !== null && cell.u2 !== undefined) showU2 = true;
+    if (!isSingleAoi && cell.u3 !== null && cell.u3 !== undefined) showU3 = true;
+    if (
+      level === 'olevel'
+        ? (cell.eotScore !== null && cell.eotScore !== undefined) ||
+          (cell.eotScore80 !== null && cell.eotScore80 !== undefined)
+        : (cell.eotScore !== null && cell.eotScore !== undefined) ||
+          (cell.numericValue !== null && cell.numericValue !== undefined)
+    ) {
+      showEot = true;
+    }
+  }
+
+  const hasAnyFormative = showU1 || showU2 || showU3;
+  const showAoiSummary = level === 'olevel' && hasAnyFormative;
+
+  if (!hasAnyFormative && !showEot) {
+    showEot = true;
+  }
+
+  return {
+    showU1,
+    showU2,
+    showU3,
+    showAoiSummary,
+    showEot,
+  };
 }

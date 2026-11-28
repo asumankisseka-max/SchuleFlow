@@ -8,11 +8,33 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import {
+  clearAllOfflineState,
+  enqueueOfflineMutation,
+  flushOutboxQueue,
+  getPendingOutboxCount,
+  isNetworkOfflineError,
+  loadLastSessionMeta,
+  loadTenantSnapshot,
+  saveLastSessionMeta,
+  saveTenantSnapshot,
+  type OfflineMutationKind,
+  type OfflineSyncConflict,
+  type OutboxMutationItem,
+} from '../lib/offlineSync';
 import type {
   AuditLogRecord,
   AuthSessionProfile,
+  ExaminationPeriod,
+  MarksheetRecord,
   SchoolDatabase,
+  SchoolSettings,
   SchoolTenant,
+  StreamClass,
+  StudentProfile,
+  StudentTermRemarks,
+  SubjectCombination,
+  SubjectDefinition,
   SubscriptionInvoice,
   UserAccount,
 } from '../types';
@@ -20,7 +42,7 @@ import { ApiError, configureApiClient, createTenantApi, platformApi } from '../u
 import { isSchoolSubscriptionExpired } from '../utils/plans';
 import { ROLE_DISPLAY_NAMES } from '../utils/rbac';
 
-const SESSION_STORAGE_KEY = 'schuleflow_auth_token';
+const LEGACY_SESSION_STORAGE_KEY = 'schuleflow_auth_token';
 const LEGACY_RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts';
 const RECENT_ACCOUNTS_KEY = 'schuleflow_recent_accounts_v2';
 
@@ -42,29 +64,14 @@ export interface CredentialSignInParams {
   rememberMe?: boolean;
 }
 
-function readStoredToken(): string | null {
-  if (typeof window === 'undefined') return null;
-  return (
-    window.sessionStorage.getItem(SESSION_STORAGE_KEY) ||
-    window.localStorage.getItem(SESSION_STORAGE_KEY)
-  );
-}
-
-function saveStoredToken(token: string, rememberMe: boolean): void {
+function scrubLegacyTokenStorage(): void {
   if (typeof window === 'undefined') return;
-  window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-  window.localStorage.removeItem(SESSION_STORAGE_KEY);
-  if (rememberMe) {
-    window.localStorage.setItem(SESSION_STORAGE_KEY, token);
-  } else {
-    window.sessionStorage.setItem(SESSION_STORAGE_KEY, token);
+  try {
+    window.sessionStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage access errors
   }
-}
-
-function clearStoredToken(): void {
-  if (typeof window === 'undefined') return;
-  window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
-  window.localStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
 function readRecentAccounts(): RememberedAccountHint[] {
@@ -144,6 +151,56 @@ function findMatchingStaffInDb(
   });
 }
 
+async function executeQueuedTenantMutation(
+  api: ReturnType<typeof createTenantApi>,
+  item: OutboxMutationItem
+): Promise<unknown> {
+  switch (item.kind) {
+    case 'saveMarksheet':
+      return api.saveMarksheet(item.payload as MarksheetRecord);
+    case 'saveRemark': {
+      const p = item.payload as {
+        examId: string;
+        studentId: string;
+        field: keyof StudentTermRemarks;
+        value: string;
+      };
+      return api.saveRemark(p.examId, p.studentId, p.field, p.value);
+    }
+    case 'saveSettings':
+      return api.saveSettings(item.payload as SchoolSettings);
+    case 'saveClass': {
+      const p = item.payload as { cls: StreamClass; attachToExamId?: string };
+      return api.saveClass(p.cls, p.attachToExamId);
+    }
+    case 'saveSubject':
+      return api.saveSubject(item.payload as SubjectDefinition);
+    case 'saveCombination':
+      return api.saveCombination(item.payload as SubjectCombination);
+    case 'saveExam':
+      return api.saveExam(item.payload as ExaminationPeriod);
+    case 'updateStudent':
+      return api.updateStudent(item.payload as StudentProfile);
+    case 'addStudents':
+      return api.addStudents(item.payload as StudentProfile[]);
+    case 'promoteStudents': {
+      const p = item.payload as {
+        studentIds: string[];
+        options: Parameters<typeof api.promoteStudents>[1];
+      };
+      return api.promoteStudents(p.studentIds, p.options);
+    }
+    case 'deleteStudent': {
+      const p = item.payload as { studentId: string };
+      return api.deleteStudent(p.studentId);
+    }
+    case 'publishExam': {
+      const p = item.payload as { examId: string };
+      return api.publishExam(p.examId);
+    }
+  }
+}
+
 interface SchoolContextValue {
   authProfile: AuthSessionProfile | null;
   authLoading: boolean;
@@ -164,6 +221,19 @@ interface SchoolContextValue {
   loadingWorkspace: boolean;
   workspaceError: string | null;
   recentAccounts: RememberedAccountHint[];
+  isOnline: boolean;
+  isSyncing: boolean;
+  pendingSyncCount: number;
+  syncConflicts: OfflineSyncConflict[];
+  dismissSyncConflicts: () => void;
+  syncPendingMutations: (targetSchoolId?: string) => Promise<void>;
+  persistWithOfflineFallback: <P, R = unknown>(opts: {
+    kind: OfflineMutationKind;
+    label: string;
+    payload: P;
+    dedupeKey?: string;
+    onlineCall: () => Promise<R>;
+  }) => Promise<{ queued: boolean; result?: R }>;
   clearAuthError: () => void;
   removeRecentAccount: (identifier: string, schoolId: string | null) => void;
   signInWithCredentials: (params: CredentialSignInParams) => Promise<boolean>;
@@ -201,13 +271,39 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     readRecentAccounts()
   );
 
-  const localTokenRef = useRef<string | null>(readStoredToken());
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [syncConflicts, setSyncConflicts] = useState<OfflineSyncConflict[]>([]);
+
+  // In-memory only: browser reload relies securely on the HttpOnly sf_session cookie
+  const localTokenRef = useRef<string | null>(null);
   const tenantCacheRef = useRef<Map<string, SchoolDatabase>>(new Map());
   const authProfileRef = useRef<AuthSessionProfile | null>(null);
+  const schoolsRef = useRef<SchoolTenant[]>([]);
+  const syncingRef = useRef(false);
 
   useEffect(() => {
     authProfileRef.current = authProfile;
   }, [authProfile]);
+
+  useEffect(() => {
+    schoolsRef.current = schools;
+  }, [schools]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const getValidToken = useCallback(async (): Promise<string | null> => {
     return localTokenRef.current;
@@ -225,6 +321,18 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshOutboxCount = useCallback(async (sid?: string | null, uid?: string | null) => {
+    const resolvedSid = sid ?? activeSchoolId;
+    const resolvedUid = uid ?? authProfileRef.current?.uid;
+    if (!resolvedSid || !resolvedUid) {
+      setPendingSyncCount(0);
+      return 0;
+    }
+    const count = await getPendingOutboxCount(resolvedSid, resolvedUid);
+    setPendingSyncCount(count);
+    return count;
+  }, [activeSchoolId]);
+
   const loadTenantWorkspace = useCallback(
     async (
       schoolId: string,
@@ -238,9 +346,10 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         setWorkspaceError(null);
       }
       configureApiClient(getValidToken, schoolId);
+      const activeProfile = profileOverride ?? authProfileRef.current;
+      const activeUid = activeProfile?.uid ?? '';
 
       const verifyTenantStaffMembership = (resolvedDb: SchoolDatabase): boolean => {
-        const activeProfile = profileOverride ?? authProfileRef.current;
         if (!activeProfile || activeProfile.globalRole === 'super_admin') {
           return true;
         }
@@ -278,9 +387,15 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
       };
 
       try {
-        const matchedSchool = (schoolsOverride ?? []).find((s) => s.id === schoolId);
+        const matchedSchool = (schoolsOverride ?? schoolsRef.current).find((s) => s.id === schoolId);
         if (matchedSchool && isSchoolSubscriptionExpired(matchedSchool)) {
           await enterExpiredPortalMode();
+          return;
+        }
+
+        const pendingForTenant = activeUid ? await getPendingOutboxCount(schoolId, activeUid) : 0;
+        if (pendingForTenant > 0 && silent) {
+          // Do not overwrite un-synced local offline changes during background refresh
           return;
         }
 
@@ -292,7 +407,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
               setSubscriptionPortalData(null);
               setDb(cached);
             }
-            setLoadingWorkspace(false);
+            if (!silent) setLoadingWorkspace(false);
             return;
           }
         }
@@ -311,9 +426,30 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         tenantCacheRef.current.set(schoolId, result.db);
         setDb(result.db);
         setSchools((prev) =>
-          prev.map((s) => (s.id === schoolId ? { ...s, ...result.school } : s))
+          prev.some((s) => s.id === schoolId)
+            ? prev.map((s) => (s.id === schoolId ? { ...s, ...result.school } : s))
+            : [...prev, result.school]
         );
+        if (activeUid) {
+          void saveTenantSnapshot(schoolId, activeUid, result.school, result.db);
+        }
       } catch (err: unknown) {
+        if (isNetworkOfflineError(err) && activeUid) {
+          const offlineSnap = await loadTenantSnapshot(schoolId, activeUid);
+          if (offlineSnap && verifyTenantStaffMembership(offlineSnap.db)) {
+            setSubscriptionLocked(false);
+            setSubscriptionPortalData(null);
+            tenantCacheRef.current.set(schoolId, offlineSnap.db);
+            setDb(offlineSnap.db);
+            setWorkspaceError(null);
+            setSchools((prev) =>
+              prev.some((s) => s.id === schoolId)
+                ? prev.map((s) => (s.id === schoolId ? offlineSnap.school : s))
+                : [offlineSnap.school]
+            );
+            return;
+          }
+        }
         if (
           err instanceof ApiError &&
           err.status === 403 &&
@@ -342,6 +478,100 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     },
     [getValidToken]
   );
+
+  const syncPendingMutations = useCallback(
+    async (targetSchoolId?: string) => {
+      const sid = targetSchoolId ?? activeSchoolId;
+      const uid = authProfileRef.current?.uid;
+      if (!sid || !uid || syncingRef.current) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+
+      const countBefore = await getPendingOutboxCount(sid, uid);
+      setPendingSyncCount(countBefore);
+      if (countBefore === 0) return;
+
+      syncingRef.current = true;
+      setIsSyncing(true);
+      try {
+        const api = createTenantApi(sid);
+        const result = await flushOutboxQueue({
+          schoolId: sid,
+          uid,
+          executor: (item) => executeQueuedTenantMutation(api, item),
+        });
+        setPendingSyncCount(result.remainingCount);
+        if (result.conflicts.length > 0) {
+          setSyncConflicts((prev) => [...result.conflicts, ...prev].slice(0, 10));
+        }
+        if (result.syncedCount > 0 || result.conflicts.length > 0) {
+          if (result.remainingCount === 0) {
+            await loadTenantWorkspace(sid, true, authProfileRef.current, undefined, true);
+          }
+        }
+      } finally {
+        syncingRef.current = false;
+        setIsSyncing(false);
+      }
+    },
+    [activeSchoolId, loadTenantWorkspace]
+  );
+
+  const persistWithOfflineFallback = useCallback(
+    async <P, R = unknown>(opts: {
+      kind: OfflineMutationKind;
+      label: string;
+      payload: P;
+      dedupeKey?: string;
+      onlineCall: () => Promise<R>;
+    }): Promise<{ queued: boolean; result?: R }> => {
+      const sid = activeSchoolId;
+      const uid = authProfileRef.current?.uid;
+      if (!sid || !uid) {
+        const result = await opts.onlineCall();
+        return { queued: false, result };
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        const { pendingCount } = await enqueueOfflineMutation({
+          schoolId: sid,
+          uid,
+          kind: opts.kind,
+          label: opts.label,
+          payload: opts.payload,
+          dedupeKey: opts.dedupeKey,
+        });
+        setPendingSyncCount(pendingCount);
+        return { queued: true };
+      }
+
+      try {
+        const result = await opts.onlineCall();
+        return { queued: false, result };
+      } catch (err: unknown) {
+        if (isNetworkOfflineError(err)) {
+          setIsOnline(false);
+          const { pendingCount } = await enqueueOfflineMutation({
+            schoolId: sid,
+            uid,
+            kind: opts.kind,
+            label: opts.label,
+            payload: opts.payload,
+            dedupeKey: opts.dedupeKey,
+          });
+          setPendingSyncCount(pendingCount);
+          return { queued: true };
+        }
+        throw err;
+      }
+    },
+    [activeSchoolId]
+  );
+
+  useEffect(() => {
+    if (isOnline && activeSchoolId && authProfile?.uid && pendingSyncCount > 0) {
+      void syncPendingMutations(activeSchoolId);
+    }
+  }, [isOnline, activeSchoolId, authProfile?.uid, pendingSyncCount, syncPendingMutations]);
 
   const loadPlatformData = useCallback(async () => {
     try {
@@ -435,7 +665,9 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
       authProfileRef.current = user;
       setAuthProfile(user);
       setSchools(accessibleSchools);
+      schoolsRef.current = accessibleSchools;
       rememberSignedInHint(user, accessibleSchools, preferredIdentifier);
+      void saveLastSessionMeta(user, accessibleSchools);
 
       if (user.globalRole === 'super_admin') {
         setActiveSchoolId(null);
@@ -443,6 +675,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         setSubscriptionLocked(false);
         setSubscriptionPortalData(null);
         setWorkspaceError(null);
+        setPendingSyncCount(0);
         configureApiClient(getValidToken, null);
         await loadPlatformData();
         return;
@@ -451,23 +684,28 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
       const assignedSchoolId = user.schoolId!;
       setActiveSchoolId(assignedSchoolId);
       setAuditLogs([]);
+      const queuedCount = await refreshOutboxCount(assignedSchoolId, user.uid);
+      if (queuedCount > 0 && (typeof navigator === 'undefined' || navigator.onLine)) {
+        await syncPendingMutations(assignedSchoolId);
+      }
       await loadTenantWorkspace(assignedSchoolId, true, user, accessibleSchools);
     },
-    [getValidToken, loadPlatformData, loadTenantWorkspace, rememberSignedInHint]
+    [
+      getValidToken,
+      loadPlatformData,
+      loadTenantWorkspace,
+      refreshOutboxCount,
+      rememberSignedInHint,
+      syncPendingMutations,
+    ]
   );
 
-  // Restore stored PostgreSQL session on mount
+  // Restore session securely on mount via HttpOnly cookie, falling back cleanly to IndexedDB snapshot if offline
   useEffect(() => {
     let active = true;
+    scrubLegacyTokenStorage();
 
     const restoreSession = async () => {
-      const storedToken = readStoredToken();
-      if (!storedToken) {
-        if (active) setAuthLoading(false);
-        return;
-      }
-
-      localTokenRef.current = storedToken;
       configureApiClient(getValidToken, null);
       try {
         const synced = await platformApi.syncSession();
@@ -475,12 +713,38 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         await applyAuthenticatedSession(synced.user, synced.schools);
       } catch (err: unknown) {
         localTokenRef.current = null;
-        clearStoredToken();
-        if (active) {
-          setAuthProfile(null);
-          if (!(err instanceof ApiError && err.status === 401)) {
-            setAuthError(formatFriendlyAuthError(err));
+        if (!active) return;
+
+        if (isNetworkOfflineError(err)) {
+          const offlineMeta = await loadLastSessionMeta();
+          if (offlineMeta && offlineMeta.authProfile.globalRole !== 'super_admin' && offlineMeta.authProfile.schoolId) {
+            const snap = await loadTenantSnapshot(
+              offlineMeta.authProfile.schoolId,
+              offlineMeta.authProfile.uid
+            );
+            if (snap && active) {
+              authProfileRef.current = offlineMeta.authProfile;
+              setAuthProfile(offlineMeta.authProfile);
+              setSchools(
+                offlineMeta.schools.length > 0 ? offlineMeta.schools : [snap.school]
+              );
+              setActiveSchoolId(snap.schoolId);
+              tenantCacheRef.current.set(snap.schoolId, snap.db);
+              setDb(snap.db);
+              setWorkspaceError(null);
+              await refreshOutboxCount(snap.schoolId, offlineMeta.authProfile.uid);
+              setAuthLoading(false);
+              return;
+            }
           }
+        }
+
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          await clearAllOfflineState();
+        }
+        setAuthProfile(null);
+        if (err instanceof ApiError && err.status !== 401) {
+          setAuthError(formatFriendlyAuthError(err));
         }
       } finally {
         if (active) setAuthLoading(false);
@@ -492,7 +756,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [applyAuthenticatedSession, getValidToken]);
+  }, [applyAuthenticatedSession, getValidToken, refreshOutboxCount]);
 
   const clearAuthError = useCallback(() => {
     setAuthError(null);
@@ -503,14 +767,13 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     async (params: CredentialSignInParams): Promise<boolean> => {
       const trimmedIdentifier = params.identifier.trim();
       const trimmedSchoolCode = params.schoolCode?.trim().toUpperCase() || undefined;
-      const rememberMe = params.rememberMe ?? true;
 
       setAuthError(null);
       setAuthErrorCode(null);
       setAuthLoading(true);
+      scrubLegacyTokenStorage();
       try {
         localTokenRef.current = null;
-        clearStoredToken();
         configureApiClient(async () => null, null);
 
         const res = await platformApi.loginWithCredentials({
@@ -520,13 +783,11 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         });
 
         localTokenRef.current = res.token;
-        saveStoredToken(res.token, rememberMe);
         configureApiClient(getValidToken, null);
         await applyAuthenticatedSession(res.user, res.schools, trimmedIdentifier);
         return true;
       } catch (err: unknown) {
         localTokenRef.current = null;
-        clearStoredToken();
         setAuthProfile(null);
         setDb(null);
         setAuthError(formatFriendlyAuthError(err));
@@ -542,7 +803,7 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
   const signOutWorkspace = useCallback(async () => {
     tenantCacheRef.current.clear();
     localTokenRef.current = null;
-    clearStoredToken();
+    scrubLegacyTokenStorage();
     setAuthProfile(null);
     setSchools([]);
     setAuditLogs([]);
@@ -553,6 +814,9 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     setWorkspaceError(null);
     setAuthError(null);
     setAuthErrorCode(null);
+    setPendingSyncCount(0);
+    setSyncConflicts([]);
+    await clearAllOfflineState();
     await platformApi.logoutSession().catch(() => undefined);
     if (typeof window !== 'undefined' && window.location.pathname !== '/') {
       window.history.pushState({}, '', '/');
@@ -561,12 +825,10 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
 
   const completePasswordChange = useCallback(
     (token: string, updatedUser: AuthSessionProfile) => {
-      const hasLocalStorageToken =
-        typeof window !== 'undefined' && Boolean(window.localStorage.getItem(SESSION_STORAGE_KEY));
       localTokenRef.current = token;
-      saveStoredToken(token, hasLocalStorageToken);
       authProfileRef.current = updatedUser;
       setAuthProfile(updatedUser);
+      void saveLastSessionMeta(updatedUser, schoolsRef.current);
       setDb((prev) =>
         prev
           ? {
@@ -624,6 +886,11 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
         const next = updater(prev);
         if (activeSchoolId) {
           tenantCacheRef.current.set(activeSchoolId, next);
+          const activeUid = authProfileRef.current?.uid;
+          const activeTenant = schoolsRef.current.find((s) => s.id === activeSchoolId);
+          if (activeUid && activeTenant) {
+            void saveTenantSnapshot(activeSchoolId, activeUid, activeTenant, next);
+          }
         }
         return next;
       });
@@ -640,6 +907,10 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     },
     [activeSchoolId]
   );
+
+  const dismissSyncConflicts = useCallback(() => {
+    setSyncConflicts([]);
+  }, []);
 
   const activeSchool = useMemo(
     () => schools.find((s) => s.id === activeSchoolId) ?? null,
@@ -668,6 +939,13 @@ export function SchoolProvider({ children }: { children: ReactNode }) {
     loadingWorkspace,
     workspaceError,
     recentAccounts,
+    isOnline,
+    isSyncing,
+    pendingSyncCount,
+    syncConflicts,
+    dismissSyncConflicts,
+    syncPendingMutations,
+    persistWithOfflineFallback,
     clearAuthError,
     removeRecentAccount,
     signInWithCredentials,

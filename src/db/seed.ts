@@ -1,4 +1,4 @@
-import { eq, sql } from 'drizzle-orm';
+import { eq, ne, sql } from 'drizzle-orm';
 import {
   DEFAULT_ALEVEL_GRADING_SCALE,
   DEFAULT_ALEVEL_POLICY,
@@ -28,14 +28,17 @@ import { normalizeUserRole } from '../utils/rbac.ts';
 import { normalizeStoredPhone } from '../utils/validation.ts';
 import { createClient, db, ensureReachableDbConnection } from './index.ts';
 import {
+  auditLogs,
   classesStreams,
   examinations,
   gradingConfigs,
   loginActivity,
+  marksheetCorrectionRequests,
   marksheets,
   platformRuntimeConfig,
   schools,
   staffTeachers,
+  studentRemarks,
   students,
   subjectCombinations,
   subjects,
@@ -165,7 +168,12 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
   }
 
   if (missingColStatements.length > 0) {
-    await client.unsafe(missingColStatements.join('\n'));
+    try {
+      await client.unsafe(missingColStatements.join('\n'));
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code !== '42501') throw err;
+    }
   }
 
   const schoolRows = (await client.unsafe(
@@ -301,7 +309,11 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
         'schools_code_idx',
         'users_school_staff_id_idx',
         'staff_school_staff_id_idx',
-        'students_school_student_id_idx'
+        'students_school_student_id_idx',
+        'students_school_status_idx',
+        'marksheets_school_exam_status_idx',
+        'correction_req_school_status_idx',
+        'audit_logs_school_ts_idx'
       )
   `)) as Array<{ indexname: string }>;
 
@@ -323,6 +335,26 @@ async function ensureSchemaColumnsAndBackfill(): Promise<void> {
   if (!hasIdx('students_school_student_id_idx')) {
     indexStatements.push(
       `CREATE UNIQUE INDEX IF NOT EXISTS students_school_student_id_idx ON students (school_id, student_id);`
+    );
+  }
+  if (!hasIdx('students_school_status_idx')) {
+    indexStatements.push(
+      `CREATE INDEX IF NOT EXISTS students_school_status_idx ON students (school_id, status);`
+    );
+  }
+  if (!hasIdx('marksheets_school_exam_status_idx')) {
+    indexStatements.push(
+      `CREATE INDEX IF NOT EXISTS marksheets_school_exam_status_idx ON marksheets (school_id, exam_id, status);`
+    );
+  }
+  if (!hasIdx('correction_req_school_status_idx')) {
+    indexStatements.push(
+      `CREATE INDEX IF NOT EXISTS correction_req_school_status_idx ON marksheet_correction_requests (school_id, status);`
+    );
+  }
+  if (!hasIdx('audit_logs_school_ts_idx')) {
+    indexStatements.push(
+      `CREATE INDEX IF NOT EXISTS audit_logs_school_ts_idx ON audit_logs (school_id, timestamp);`
     );
   }
 
@@ -569,6 +601,45 @@ export async function ensureInitialTenantsSeeded(): Promise<void> {
     })();
   }
   return seedPromise;
+}
+
+export async function resetCloudDatabaseToPreviewBaseline(): Promise<{
+  schoolId: string;
+  schoolCode: string;
+  schoolName: string;
+}> {
+  await ensureReachableDbConnection();
+  await ensurePersistentSessionSecret();
+  await ensureSchemaColumnsAndBackfill();
+
+  await db.transaction(async (tx) => {
+    await tx.delete(marksheetCorrectionRequests);
+    await tx.delete(studentRemarks);
+    await tx.delete(marksheets);
+    await tx.delete(examinations);
+    await tx.delete(students);
+    await tx.delete(classesStreams);
+    await tx.delete(subjectCombinations);
+    await tx.delete(subjects);
+    await tx.delete(staffTeachers);
+    await tx.delete(gradingConfigs);
+    await tx.delete(subscriptionInvoices);
+    await tx.delete(loginActivity);
+    await tx.delete(auditLogs);
+    await tx.delete(users).where(ne(users.globalRole, 'super_admin'));
+    await tx.delete(schools);
+  });
+
+  await seedJanguInternational();
+  await ensureSuperAdminSeeded();
+  await ensureSeededStaffCredentials();
+  seedPromise = Promise.resolve();
+
+  return {
+    schoolId: 'sch-jangu-international',
+    schoolCode: 'JIS-101',
+    schoolName: INITIAL_SCHOOL_DATABASE.settings.schoolName,
+  };
 }
 
 async function seedJanguInternational() {

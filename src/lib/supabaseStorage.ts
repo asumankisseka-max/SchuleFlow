@@ -13,35 +13,67 @@ const MIME_EXT_MAP: Record<string, string> = {
 
 let ensuredBucketName: string | null = null;
 
+function isAnonOrPublishableKey(key: string): boolean {
+  const trimmed = key.trim();
+  if (!trimmed) return true;
+  if (trimmed.startsWith('sb_publishable_')) return true;
+  if (trimmed.startsWith('sb_secret_')) return false;
+  const parts = trimmed.split('.');
+  if (parts.length === 3) {
+    try {
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as {
+        role?: string;
+      };
+      if (payload?.role && payload.role !== 'service_role' && payload.role !== 'supabase_admin') {
+        return true;
+      }
+    } catch {
+      // Unparseable JWT; let Supabase client validate
+    }
+  }
+  return false;
+}
+
 function resolveSupabaseCredentials(): {
   url: string;
   key: string;
   bucket: string;
+  hasServiceRole: boolean;
 } | null {
   const url = (
     process.env.SUPABASE_URL ||
     process.env.VITE_SUPABASE_URL ||
     ''
   ).trim();
-  const key = (
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const anonKey = (
     process.env.SUPABASE_ANON_KEY ||
     process.env.VITE_SUPABASE_ANON_KEY ||
     ''
   ).trim();
+  const key = serviceKey || anonKey;
   const bucket = (process.env.SUPABASE_STORAGE_BUCKET || DEFAULT_BUCKET).trim();
 
   if (!url || !key) return null;
-  return { url, key, bucket };
+  return {
+    url,
+    key,
+    bucket,
+    hasServiceRole: Boolean(serviceKey && !isAnonOrPublishableKey(serviceKey)),
+  };
 }
 
-function getSupabaseAdminClient(): { client: SupabaseClient; bucket: string } | null {
+function getSupabaseAdminClient(): {
+  client: SupabaseClient;
+  bucket: string;
+  hasServiceRole: boolean;
+} | null {
   const creds = resolveSupabaseCredentials();
   if (!creds) return null;
   const client = createClient(creds.url, creds.key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
-  return { client, bucket: creds.bucket };
+  return { client, bucket: creds.bucket, hasServiceRole: creds.hasServiceRole };
 }
 
 export function isSupabaseStorageConfigured(): {
@@ -50,7 +82,7 @@ export function isSupabaseStorageConfigured(): {
   urlOrigin?: string;
 } {
   const creds = resolveSupabaseCredentials();
-  if (!creds) {
+  if (!creds || !creds.hasServiceRole) {
     return {
       configured: false,
       bucket: (process.env.SUPABASE_STORAGE_BUCKET || DEFAULT_BUCKET).trim(),
@@ -123,12 +155,16 @@ export async function uploadMediaToSupabase(params: {
   folder: 'logos' | 'students';
   entityId?: string;
   dataUrl: string;
+  strictSupabase?: boolean;
+  supabaseClientOverride?: SupabaseClient;
 }): Promise<{
   url: string;
   storage: 'supabase' | 'inline';
   path?: string;
+  warning?: string;
 }> {
-  const { schoolId, folder, entityId, dataUrl } = params;
+  const { schoolId, folder, entityId, dataUrl, strictSupabase = false, supabaseClientOverride } =
+    params;
 
   // Already a remote URL (e.g., already stored in Supabase)
   if (!isInlineDataImageUrl(dataUrl)) {
@@ -138,10 +174,24 @@ export async function uploadMediaToSupabase(params: {
     throw new Error('Media value must be a valid image data URL or HTTPS URL.');
   }
 
-  const parsed = parseBase64ImageDataUrl(dataUrl.trim());
-  const supa = getSupabaseAdminClient();
-  if (!supa) {
-    return { url: dataUrl.trim(), storage: 'inline' };
+  const trimmedDataUrl = dataUrl.trim();
+  const parsed = parseBase64ImageDataUrl(trimmedDataUrl);
+  const supa = supabaseClientOverride
+    ? {
+        client: supabaseClientOverride,
+        bucket: (process.env.SUPABASE_STORAGE_BUCKET || DEFAULT_BUCKET).trim(),
+        hasServiceRole: true,
+      }
+    : getSupabaseAdminClient();
+
+  if (!supa || (!supa.hasServiceRole && !strictSupabase)) {
+    return { url: trimmedDataUrl, storage: 'inline' };
+  }
+
+  if (!supa.hasServiceRole && strictSupabase) {
+    throw new Error(
+      'Supabase Storage requires SUPABASE_SERVICE_ROLE_KEY (secret service_role key, not the anon/publishable key) to bypass storage RLS policies.'
+    );
   }
 
   const safeSchool = schoolId.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -150,30 +200,57 @@ export async function uploadMediaToSupabase(params: {
     .slice(0, 64);
   const objectPath = `schools/${safeSchool}/${folder}/${safeEntity}-${Date.now()}.${parsed.ext}`;
 
-  await ensureBucketExists(supa.client, supa.bucket);
+  try {
+    await ensureBucketExists(supa.client, supa.bucket);
 
-  const { error: uploadErr } = await supa.client.storage
-    .from(supa.bucket)
-    .upload(objectPath, parsed.buffer, {
-      contentType: parsed.mimeType,
-      cacheControl: '31536000',
-      upsert: true,
-    });
+    const { error: uploadErr } = await supa.client.storage
+      .from(supa.bucket)
+      .upload(objectPath, parsed.buffer, {
+        contentType: parsed.mimeType,
+        cacheControl: '31536000',
+        upsert: true,
+      });
 
-  if (uploadErr) {
-    throw new Error(`Supabase Storage upload failed: ${uploadErr.message}`);
+    if (uploadErr) {
+      const msg = uploadErr.message || 'Unknown storage error';
+      const isRls = msg.toLowerCase().includes('row-level security');
+      if (!strictSupabase) {
+        console.warn(
+          `Supabase Storage upload failed (${msg}); falling back to inline PostgreSQL media storage.`
+        );
+        return { url: trimmedDataUrl, storage: 'inline', warning: msg };
+      }
+      if (isRls) {
+        throw new Error(
+          'Supabase Storage upload blocked by Row-Level Security (RLS). Ensure SUPABASE_SERVICE_ROLE_KEY is set to the project service_role key (not anon/publishable).'
+        );
+      }
+      throw new Error(`Supabase Storage upload failed: ${msg}`);
+    }
+
+    const { data: pubData } = supa.client.storage.from(supa.bucket).getPublicUrl(objectPath);
+    if (!pubData?.publicUrl) {
+      if (!strictSupabase) {
+        return { url: trimmedDataUrl, storage: 'inline' };
+      }
+      throw new Error('Supabase Storage did not return a public URL for uploaded media.');
+    }
+
+    return {
+      url: pubData.publicUrl,
+      storage: 'supabase',
+      path: objectPath,
+    };
+  } catch (err: unknown) {
+    if (!strictSupabase) {
+      const msg = err instanceof Error ? err.message : 'Supabase Storage unavailable';
+      console.warn(
+        `Supabase Storage exception (${msg}); falling back to inline PostgreSQL media storage.`
+      );
+      return { url: trimmedDataUrl, storage: 'inline', warning: msg };
+    }
+    throw err;
   }
-
-  const { data: pubData } = supa.client.storage.from(supa.bucket).getPublicUrl(objectPath);
-  if (!pubData?.publicUrl) {
-    throw new Error('Supabase Storage did not return a public URL for uploaded media.');
-  }
-
-  return {
-    url: pubData.publicUrl,
-    storage: 'supabase',
-    path: objectPath,
-  };
 }
 
 export async function deleteMediaFromSupabaseByUrl(

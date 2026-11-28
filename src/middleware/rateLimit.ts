@@ -8,10 +8,7 @@ interface RateBucket {
 const buckets = new Map<string, RateBucket>();
 
 function extractClientIp(req: Request): string {
-  const fwd = req.headers['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd.trim()) {
-    return fwd.split(',')[0].trim();
-  }
+  // Rely on Express's req.ip which respects `app.set('trust proxy', 1)` instead of raw spoofable X-Forwarded-For headers
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
@@ -91,4 +88,11 @@ export const recoveryRateLimiter = createRateLimiter({
   windowMs: 15 * 60 * 1000,
   maxAttempts: 8,
   message: 'Too many account recovery attempts.',
+});
+
+export const apiMutationRateLimiter = createRateLimiter({
+  name: 'api_mutation',
+  windowMs: 60 * 1000,
+  maxAttempts: 600,
+  message: 'Too many requests from this network address.',
 });

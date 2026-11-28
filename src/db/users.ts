@@ -1,5 +1,6 @@
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import {
+  consumeRecoveryTokenJti,
   hashPassword,
   signRecoveryToken,
   validatePasswordStrength,
@@ -7,13 +8,22 @@ import {
   verifyRecoveryToken,
   type RecoveryLookupMethod,
 } from '../lib/passwordAuth.ts';
-import type { AuthSessionProfile, PublicSchoolBranding, UserRole } from '../types.ts';
+import type {
+  AuthSessionProfile,
+  BillingStatus,
+  CurriculumScope,
+  PublicSchoolBranding,
+  SchoolStatus,
+  SchoolTenant,
+  SubscriptionPlan,
+  UserRole,
+} from '../types.ts';
 import { normalizeShortStaffIdCandidate } from '../utils/idGenerator.ts';
 import { normalizeUserRole, ROLE_DISPLAY_NAMES } from '../utils/rbac.ts';
 import { DEFAULT_UNIFORM_PRIMARY, DEFAULT_UNIFORM_SECONDARY } from '../utils/schoolTheme.ts';
 import { buildPhoneLoginCandidates, normalizeStoredPhone } from '../utils/validation.ts';
 import { db } from './index.ts';
-import { schools, staffTeachers, users } from './schema.ts';
+import { platformRuntimeConfig, schools, staffTeachers, users } from './schema.ts';
 
 function toProfile(
   row: typeof users.$inferSelect,
@@ -37,26 +47,106 @@ function toProfile(
   };
 }
 
-export async function getUserProfileByUid(uid: string): Promise<AuthSessionProfile | null> {
+function toSchoolTenant(row: typeof schools.$inferSelect): SchoolTenant {
+  return {
+    id: row.id,
+    schoolCode: row.schoolCode,
+    name: row.name,
+    subdomain: row.subdomain,
+    ministryRegNo: row.ministryRegNo,
+    subCounty: row.subCounty,
+    motto: row.motto,
+    logoUrl: row.logoUrl,
+    primaryColor: row.primaryColor,
+    secondaryColor: row.secondaryColor,
+    address: row.address,
+    phone: row.phone,
+    email: row.email,
+    district: row.district,
+    region: row.region,
+    status: row.status as SchoolStatus,
+    subscriptionStatus: (row.subscriptionStatus || row.status) as SchoolStatus,
+    licenseExpiresAt: row.licenseExpiresAt.toISOString(),
+    plan: row.plan as SubscriptionPlan,
+    curriculumScope: row.curriculumScope as CurriculumScope,
+    studentQuota: row.studentQuota,
+    termFeePerStudentUgx: row.termFeePerStudentUgx,
+    billingStatus: row.billingStatus as BillingStatus,
+    nextBillingDate: row.nextBillingDate,
+    academicYear: row.academicYear,
+    termName: row.termName,
+    principalName: row.principalName,
+    dosName: row.dosName,
+    reportsGeneratedCount: row.reportsGeneratedCount,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+export interface AuthContextLookupResult {
+  profile: AuthSessionProfile;
+  sessionValidAfterMs: number | null;
+  school: SchoolTenant | null;
+}
+
+export async function getAuthContextByUid(
+  uid: string
+): Promise<AuthContextLookupResult | null> {
   try {
-    const rows = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
-    const row = rows[0];
-    if (!row) return null;
+    const rows = await db
+      .select({
+        user: users,
+        school: schools,
+        sva: platformRuntimeConfig,
+      })
+      .from(users)
+      .leftJoin(schools, eq(users.schoolId, schools.id))
+      .leftJoin(
+        platformRuntimeConfig,
+        eq(platformRuntimeConfig.key, sql`'sva:' || ${users.uid}`)
+      )
+      .where(eq(users.uid, uid))
+      .limit(1);
 
-    let schoolCode: string | null = null;
-    if (row.globalRole !== 'super_admin' && row.schoolId) {
-      const schRows = await db
-        .select({ schoolCode: schools.schoolCode })
-        .from(schools)
-        .where(eq(schools.id, row.schoolId))
-        .limit(1);
-      schoolCode = schRows[0]?.schoolCode ?? null;
-    }
+    const joined = rows[0];
+    if (!joined) return null;
 
-    return toProfile(row, schoolCode);
+    const schoolTenant =
+      joined.user.globalRole !== 'super_admin' && joined.school
+        ? toSchoolTenant(joined.school)
+        : null;
+
+    const parsedSva = joined.sva?.value ? Number(joined.sva.value) : NaN;
+    const sessionValidAfterMs = Number.isFinite(parsedSva) ? parsedSva : null;
+
+    return {
+      profile: toProfile(joined.user, schoolTenant?.schoolCode ?? null),
+      sessionValidAfterMs,
+      school: schoolTenant,
+    };
   } catch (error) {
-    console.error('Database error loading user by uid:', error);
+    console.error('Database error loading auth context by uid:', error);
     return null;
+  }
+}
+
+export async function getUserProfileByUid(uid: string): Promise<AuthSessionProfile | null> {
+  const ctx = await getAuthContextByUid(uid);
+  return ctx?.profile ?? null;
+}
+
+export async function revokeUserSessionsByUid(uid: string, timestampMs = Date.now()): Promise<void> {
+  try {
+    const key = `sva:${uid}`;
+    const value = String(timestampMs);
+    await db
+      .insert(platformRuntimeConfig)
+      .values({ key, value, updatedAt: new Date(timestampMs) })
+      .onConflictDoUpdate({
+        target: platformRuntimeConfig.key,
+        set: { value, updatedAt: new Date(timestampMs) },
+      });
+  } catch (error) {
+    console.warn('Could not persist session revocation watermark:', error);
   }
 }
 
@@ -903,17 +993,49 @@ export async function resetPasswordWithRecoveryToken(
     throw new Error(strengthErr);
   }
 
+  let targetUid: string | null = null;
+  if (payload.userId) {
+    const existingRows = await db
+      .select({ uid: users.uid })
+      .from(users)
+      .where(eq(users.id, payload.userId))
+      .limit(1);
+    targetUid = existingRows[0]?.uid ?? null;
+    if (targetUid) {
+      const svaRows = await db
+        .select({ value: platformRuntimeConfig.value })
+        .from(platformRuntimeConfig)
+        .where(eq(platformRuntimeConfig.key, `sva:${targetUid}`))
+        .limit(1);
+      const revokedMs = svaRows[0]?.value ? Number(svaRows[0].value) : NaN;
+      if (Number.isFinite(revokedMs) && payload.iat < revokedMs) {
+        return null;
+      }
+    }
+  }
+
+  if (!consumeRecoveryTokenJti(payload.jti, payload.exp)) {
+    return null;
+  }
+
   const nextHash = hashPassword(trimmedPwd);
   const cleanEmail = payload.email.trim().toLowerCase();
+  const revokedAtMs = Date.now();
 
   let updatedUser: typeof users.$inferSelect | null = null;
   if (payload.userId) {
     const updated = await db
       .update(users)
-      .set({ passwordHash: nextHash, mustChangePassword: false })
+      .set({
+        passwordHash: nextHash,
+        mustChangePassword: false,
+      })
       .where(eq(users.id, payload.userId))
       .returning();
     updatedUser = updated[0] ?? null;
+    if (updatedUser) {
+      await revokeUserSessionsByUid(updatedUser.uid, revokedAtMs);
+    }
   }
 
   if (payload.staffId) {
@@ -966,10 +1088,16 @@ export async function resetPasswordWithRecoveryToken(
         })
         .onConflictDoUpdate({
           target: users.uid,
-          set: { passwordHash: nextHash, mustChangePassword: false },
+          set: {
+            passwordHash: nextHash,
+            mustChangePassword: false,
+          },
         })
         .returning();
       updatedUser = inserted[0] ?? null;
+      if (updatedUser) {
+        await revokeUserSessionsByUid(updatedUser.uid, revokedAtMs);
+      }
     }
   }
 
@@ -989,7 +1117,7 @@ export async function changeAuthenticatedUserPassword(params: {
   schoolId: string | null;
   currentPassword: string;
   newPassword: string;
-}): Promise<AuthSessionProfile> {
+}): Promise<AuthSessionProfile & { sessionValidAfterMs: number }> {
   const { uid, email, schoolId, currentPassword, newPassword } = params;
   const strengthErr = validatePasswordStrength(newPassword);
   if (strengthErr) {
@@ -1012,12 +1140,18 @@ export async function changeAuthenticatedUserPassword(params: {
 
   const nextHash = hashPassword(newPassword.trim());
   const cleanEmail = email.trim().toLowerCase();
+  const revokedAtMs = Date.now();
 
   const updated = await db
     .update(users)
-    .set({ passwordHash: nextHash, mustChangePassword: false })
+    .set({
+      passwordHash: nextHash,
+      mustChangePassword: false,
+    })
     .where(eq(users.id, userRow.id))
     .returning();
+
+  await revokeUserSessionsByUid(userRow.uid, revokedAtMs);
 
   if (schoolId) {
     await db
@@ -1046,5 +1180,8 @@ export async function changeAuthenticatedUserPassword(params: {
     schoolCode = sch[0]?.schoolCode ?? null;
   }
 
-  return toProfile(updated[0], schoolCode);
+  return {
+    ...toProfile(updated[0], schoolCode),
+    sessionValidAfterMs: revokedAtMs,
+  };
 }

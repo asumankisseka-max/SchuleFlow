@@ -239,6 +239,7 @@ export const students = pgTable(
   (table) => [
     index('students_school_idx').on(table.schoolId),
     index('students_school_class_idx').on(table.schoolId, table.classId),
+    index('students_school_status_idx').on(table.schoolId, table.status),
     uniqueIndex('students_school_student_id_idx').on(table.schoolId, table.studentId),
   ]
 );
@@ -293,6 +294,7 @@ export const marksheets = pgTable(
   },
   (table) => [
     index('marksheets_school_idx').on(table.schoolId),
+    index('marksheets_school_exam_status_idx').on(table.schoolId, table.examId, table.status),
     index('marksheets_lookup_idx').on(
       table.schoolId,
       table.examId,
@@ -343,6 +345,7 @@ export const marksheetCorrectionRequests = pgTable(
   },
   (table) => [
     index('correction_req_school_idx').on(table.schoolId),
+    index('correction_req_school_status_idx').on(table.schoolId, table.status),
     index('correction_req_lookup_idx').on(
       table.schoolId,
       table.examId,
@@ -409,6 +412,7 @@ export const auditLogs = pgTable(
   (table) => [
     index('audit_logs_timestamp_idx').on(table.timestamp),
     index('audit_logs_school_idx').on(table.schoolId),
+    index('audit_logs_school_ts_idx').on(table.schoolId, table.timestamp),
   ]
 );
 

@@ -61,6 +61,9 @@ export function PlatformAdminView({
   const [deleteTarget, setDeleteTarget] = useState<SchoolTenant | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
+  const [resetModalOpen, setResetModalOpen] = useState(false);
+  const [resetConfirmText, setResetConfirmText] = useState('');
+  const [resettingBaseline, setResettingBaseline] = useState(false);
 
   const metrics = useMemo(() => {
     const activeCount = schools.filter((s) => s.subscriptionStatus === 'active').length;
@@ -209,6 +212,29 @@ export function PlatformAdminView({
     }
   };
 
+  const handleConfirmResetBaseline = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (resetConfirmText.trim().toUpperCase() !== 'RESET') {
+      setErrorBanner('Please type RESET exactly to confirm.');
+      return;
+    }
+    setResettingBaseline(true);
+    setErrorBanner(null);
+    try {
+      const result = await platformApi.resetToBaseline('RESET');
+      setResetModalOpen(false);
+      setResetConfirmText('');
+      await onRefreshPlatform();
+      setNotice(
+        `Cloud database renewed to clean preview baseline: ${result.schoolName} (${result.schoolCode}).`
+      );
+    } catch (err: unknown) {
+      setErrorBanner(err instanceof Error ? err.message : 'Failed to reset cloud database.');
+    } finally {
+      setResettingBaseline(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       {/* Platform Super Admin Header (Strictly Isolated from School Academic Workspaces) */}
@@ -276,6 +302,19 @@ export function PlatformAdminView({
             >
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               <span>Refresh</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setErrorBanner(null);
+                setResetConfirmText('');
+                setResetModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-900 hover:bg-amber-100 whitespace-nowrap"
+              title="Reset published database to clean Jangu International School preview baseline"
+            >
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Renew Cloud Data</span>
             </button>
             <button
               type="button"
@@ -697,6 +736,82 @@ export function PlatformAdminView({
                     <Trash2 className="h-3.5 w-3.5" />
                   )}
                   <span>{deleting ? 'Deleting...' : 'Permanently Delete School'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {resetModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white overflow-hidden shadow-lg">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 bg-amber-50/80">
+              <div className="flex items-center gap-2.5 text-amber-950">
+                <AlertTriangle className="h-5 w-5 text-amber-700 shrink-0" />
+                <h3 className="font-display text-sm font-bold">Renew Cloud Data to Preview Baseline</h3>
+              </div>
+              <button
+                type="button"
+                disabled={resettingBaseline}
+                onClick={() => {
+                  setResetModalOpen(false);
+                  setResetConfirmText('');
+                }}
+                className="p-1 rounded text-slate-500 hover:bg-slate-200"
+                aria-label="Close renew confirmation"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmResetBaseline} className="p-5 space-y-4 text-xs">
+              <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-3 space-y-1 text-amber-950">
+                <p className="font-semibold">Clean Baseline: Jangu International School (JIS-101)</p>
+                <p className="text-[11px] text-amber-900">
+                  Clears all existing schools, staff, students, exams, marksheets, and audit logs in this
+                  database, then restores the exact preview baseline (Super Admin + JIS-101 with staff 001–004).
+                </p>
+              </div>
+
+              <div>
+                <label className="block font-medium text-slate-700 mb-1.5">
+                  Type <span className="font-mono font-bold text-slate-900">RESET</span> to confirm:
+                </label>
+                <input
+                  type="text"
+                  required
+                  disabled={resettingBaseline}
+                  value={resetConfirmText}
+                  onChange={(e) => setResetConfirmText(e.target.value)}
+                  placeholder="RESET"
+                  className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-slate-900 focus:border-amber-600 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  disabled={resettingBaseline}
+                  onClick={() => {
+                    setResetModalOpen(false);
+                    setResetConfirmText('');
+                  }}
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={resettingBaseline || resetConfirmText.trim().toUpperCase() !== 'RESET'}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-amber-700 px-4 py-2 font-semibold text-white hover:bg-amber-800 disabled:opacity-50"
+                >
+                  {resettingBaseline ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                  <span>{resettingBaseline ? 'Renewing...' : 'Renew Cloud Database'}</span>
                 </button>
               </div>
             </form>

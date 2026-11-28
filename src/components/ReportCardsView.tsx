@@ -35,6 +35,7 @@ import {
   buildExamClassView,
   calculateClassPerformance,
   getGradingScaleForLevel,
+  getReportCardVisibleAssessments,
 } from '../utils/calculations';
 import { processStudentPhoto } from '../utils/photo';
 import { downloadReportCardsPdf } from '../utils/reportPdf';
@@ -292,6 +293,27 @@ function ReportCardSheet({
   const principalSubjects = examClass.subjects.filter((s) => s.category !== 'subsidiary');
   const subsidiarySubjects = examClass.subjects.filter((s) => s.category === 'subsidiary');
 
+  const olevelVis = useMemo(
+    () => getReportCardVisibleAssessments(examClass.subjects, studentResult, 'olevel', cbc),
+    [examClass.subjects, studentResult, cbc]
+  );
+  const alevelPrincipalVis = useMemo(
+    () => getReportCardVisibleAssessments(principalSubjects, studentResult, 'alevel', cbc),
+    [principalSubjects, studentResult, cbc]
+  );
+  const alevelSubVis = useMemo(
+    () => getReportCardVisibleAssessments(subsidiarySubjects, studentResult, 'alevel', cbc),
+    [subsidiarySubjects, studentResult, cbc]
+  );
+
+  const olevelAssessmentColSpan = [
+    olevelVis.showU1,
+    olevelVis.showU2,
+    olevelVis.showU3,
+    olevelVis.showAoiSummary,
+    olevelVis.showEot,
+  ].filter(Boolean).length;
+
   const handlePhotoSelect = async (file: File) => {
     if (!onUpdatePhoto) return;
     setUploadingPhoto(true);
@@ -497,7 +519,7 @@ function ReportCardSheet({
         )}
       </section>
 
-      {/* Subject Marks Table: Distinct O'Level CBC vs A'Level Principal+Subsidiary */}
+      {/* Subject Marks Table: Distinct O'Level CBC vs A'Level Principal+Subsidiary (Dynamic assessments made) */}
       <section className={isCompact ? 'mt-3.5 print:mt-2 overflow-x-auto print:overflow-visible' : 'mt-5 print:mt-2 overflow-x-auto print:overflow-visible'}>
         {isOlevel ? (
           <table className="w-full border-collapse text-left text-xs print:text-[10px] print:leading-tight">
@@ -506,16 +528,22 @@ function ReportCardSheet({
                 <th className={cellPad}>Subject</th>
                 {layout.showSubjectTeacher && <th className={cellPad}>Teacher</th>}
                 {cbc.aoiInputMode === 'single_aoi' ? (
-                  <th className={`${cellPad} text-right`}>Classwork /{cbc.aoiMaxMark}</th>
+                  olevelVis.showU1 && (
+                    <th className={`${cellPad} text-right`}>Classwork /{cbc.aoiMaxMark}</th>
+                  )
                 ) : (
                   <>
-                    <th className={`${cellPad} text-right`}>U1</th>
-                    <th className={`${cellPad} text-right`}>U2</th>
-                    <th className={`${cellPad} text-right`}>U3</th>
+                    {olevelVis.showU1 && <th className={`${cellPad} text-right`}>U1</th>}
+                    {olevelVis.showU2 && <th className={`${cellPad} text-right`}>U2</th>}
+                    {olevelVis.showU3 && <th className={`${cellPad} text-right`}>U3</th>}
                   </>
                 )}
-                <th className={`${cellPad} text-right`}>AoI ({cbc.formativeWeight}%)</th>
-                <th className={`${cellPad} text-right`}>EoT ({cbc.summativeWeight}%)</th>
+                {olevelVis.showAoiSummary && (
+                  <th className={`${cellPad} text-right`}>AoI ({cbc.formativeWeight}%)</th>
+                )}
+                {olevelVis.showEot && (
+                  <th className={`${cellPad} text-right`}>EoT ({cbc.summativeWeight}%)</th>
+                )}
                 <th className={`${cellPad} text-right`}>Total (100%)</th>
                 <th className={`${cellPad} text-center`}>ID</th>
                 {layout.showClassAverage && <th className={`${cellPad} text-right`}>Class Avg</th>}
@@ -542,32 +570,44 @@ function ReportCardSheet({
                       <td className={`${cellPad} text-slate-600`}>{sub.teacher || '—'}</td>
                     )}
                     {cbc.aoiInputMode === 'single_aoi' ? (
-                      <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
-                        {cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—'}
-                      </td>
-                    ) : (
-                      <>
+                      olevelVis.showU1 && (
                         <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
                           {cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—'}
                         </td>
-                        <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
-                          {cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—'}
-                        </td>
-                        <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
-                          {cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—'}
-                        </td>
+                      )
+                    ) : (
+                      <>
+                        {olevelVis.showU1 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—'}
+                          </td>
+                        )}
+                        {olevelVis.showU2 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—'}
+                          </td>
+                        )}
+                        {olevelVis.showU3 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—'}
+                          </td>
+                        )}
                       </>
                     )}
-                    <td className={`${cellPad} text-right font-mono tabular-nums text-slate-800 font-medium`}>
-                      {cell?.aoiScore20 !== null && cell?.aoiScore20 !== undefined
-                        ? cell.aoiScore20.toFixed(1)
-                        : '—'}
-                    </td>
-                    <td className={`${cellPad} text-right font-mono tabular-nums text-slate-800 font-medium`}>
-                      {cell?.eotScore80 !== null && cell?.eotScore80 !== undefined
-                        ? cell.eotScore80.toFixed(1)
-                        : '—'}
-                    </td>
+                    {olevelVis.showAoiSummary && (
+                      <td className={`${cellPad} text-right font-mono tabular-nums text-slate-800 font-medium`}>
+                        {cell?.aoiScore20 !== null && cell?.aoiScore20 !== undefined
+                          ? cell.aoiScore20.toFixed(1)
+                          : '—'}
+                      </td>
+                    )}
+                    {olevelVis.showEot && (
+                      <td className={`${cellPad} text-right font-mono tabular-nums text-slate-800 font-medium`}>
+                        {cell?.eotScore80 !== null && cell?.eotScore80 !== undefined
+                          ? cell.eotScore80.toFixed(1)
+                          : '—'}
+                      </td>
+                    )}
                     <td
                       className={`${cellPad} text-right font-mono tabular-nums font-semibold ${
                         isFail ? 'text-red-700' : 'text-slate-900'
@@ -609,13 +649,11 @@ function ReportCardSheet({
                 <td className={cellPad}>Overall CBC Standing</td>
                 {layout.showSubjectTeacher && <td className={cellPad} />}
                 <td
-                  colSpan={cbc.aoiInputMode === 'single_aoi' ? 1 : 3}
+                  colSpan={Math.max(1, olevelAssessmentColSpan)}
                   className={`${cellPad} text-right text-[11px] font-normal text-slate-500`}
                 >
                   Mean ({studentResult.assessedCount} subjects)
                 </td>
-                <td className={cellPad} />
-                <td className={cellPad} />
                 <td className={`${cellPad} text-right font-mono tabular-nums`}>
                   {studentResult.percentage.toFixed(1)}%
                 </td>
@@ -647,7 +685,12 @@ function ReportCardSheet({
                   <tr className={`border-y border-slate-300 ${accent.tableHead} font-semibold`}>
                     <th className={cellPad}>Principal Subject</th>
                     {layout.showSubjectTeacher && <th className={cellPad}>Teacher</th>}
-                    <th className={`${cellPad} text-right`}>Mark (100)</th>
+                    {alevelPrincipalVis.showU1 && <th className={`${cellPad} text-right`}>U1</th>}
+                    {alevelPrincipalVis.showU2 && <th className={`${cellPad} text-right`}>U2</th>}
+                    {alevelPrincipalVis.showU3 && <th className={`${cellPad} text-right`}>U3</th>}
+                    {alevelPrincipalVis.showEot && (
+                      <th className={`${cellPad} text-right`}>Mark (100)</th>
+                    )}
                     {layout.showClassAverage && <th className={`${cellPad} text-right`}>Class Avg</th>}
                     {layout.showSubjectRank && <th className={`${cellPad} text-center`}>Pos.</th>}
                     <th className={`${cellPad} text-center`}>Grade</th>
@@ -671,19 +714,36 @@ function ReportCardSheet({
                         {layout.showSubjectTeacher && (
                           <td className={`${cellPad} text-slate-600`}>{sub.teacher || '—'}</td>
                         )}
-                        <td
-                          className={`${cellPad} text-right font-mono tabular-nums font-semibold ${
-                            isFail ? 'text-red-700' : 'text-slate-900'
-                          }`}
-                        >
-                          {cell?.exempted
-                            ? 'EX'
-                            : cell?.missed
-                              ? 'ABS'
-                              : cell?.numericValue !== null && cell?.numericValue !== undefined
-                                ? cell.numericValue
-                                : '—'}
-                        </td>
+                        {alevelPrincipalVis.showU1 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—'}
+                          </td>
+                        )}
+                        {alevelPrincipalVis.showU2 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—'}
+                          </td>
+                        )}
+                        {alevelPrincipalVis.showU3 && (
+                          <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                            {cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—'}
+                          </td>
+                        )}
+                        {alevelPrincipalVis.showEot && (
+                          <td
+                            className={`${cellPad} text-right font-mono tabular-nums font-semibold ${
+                              isFail ? 'text-red-700' : 'text-slate-900'
+                            }`}
+                          >
+                            {cell?.exempted
+                              ? 'EX'
+                              : cell?.missed
+                                ? 'ABS'
+                                : cell?.numericValue !== null && cell?.numericValue !== undefined
+                                  ? cell.numericValue
+                                  : '—'}
+                          </td>
+                        )}
                         {layout.showClassAverage && (
                           <td className={`${cellPad} text-right font-mono tabular-nums text-slate-500`}>
                             {classMean.toFixed(1)}
@@ -723,7 +783,12 @@ function ReportCardSheet({
                     <tr className={`border-y border-slate-300 ${accent.tableHead} font-semibold`}>
                       <th className={cellPad}>Subsidiary Paper</th>
                       {layout.showSubjectTeacher && <th className={cellPad}>Teacher</th>}
-                      <th className={`${cellPad} text-right`}>Mark (100)</th>
+                      {alevelSubVis.showU1 && <th className={`${cellPad} text-right`}>U1</th>}
+                      {alevelSubVis.showU2 && <th className={`${cellPad} text-right`}>U2</th>}
+                      {alevelSubVis.showU3 && <th className={`${cellPad} text-right`}>U3</th>}
+                      {alevelSubVis.showEot && (
+                        <th className={`${cellPad} text-right`}>Mark (100)</th>
+                      )}
                       {layout.showClassAverage && <th className={`${cellPad} text-right`}>Class Avg</th>}
                       {layout.showSubjectRank && <th className={`${cellPad} text-center`}>Pos.</th>}
                       <th className={`${cellPad} text-center`}>Grade</th>
@@ -747,19 +812,36 @@ function ReportCardSheet({
                           {layout.showSubjectTeacher && (
                             <td className={`${cellPad} text-slate-600`}>{sub.teacher || '—'}</td>
                           )}
-                          <td
-                            className={`${cellPad} text-right font-mono tabular-nums font-semibold ${
-                              isFail ? 'text-red-700' : 'text-slate-900'
-                            }`}
-                          >
-                            {cell?.exempted
-                              ? 'EX'
-                              : cell?.missed
-                                ? 'ABS'
-                                : cell?.numericValue !== null && cell?.numericValue !== undefined
-                                  ? cell.numericValue
-                                  : '—'}
-                          </td>
+                          {alevelSubVis.showU1 && (
+                            <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                              {cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—'}
+                            </td>
+                          )}
+                          {alevelSubVis.showU2 && (
+                            <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                              {cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—'}
+                            </td>
+                          )}
+                          {alevelSubVis.showU3 && (
+                            <td className={`${cellPad} text-right font-mono tabular-nums text-slate-600`}>
+                              {cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—'}
+                            </td>
+                          )}
+                          {alevelSubVis.showEot && (
+                            <td
+                              className={`${cellPad} text-right font-mono tabular-nums font-semibold ${
+                                isFail ? 'text-red-700' : 'text-slate-900'
+                              }`}
+                            >
+                              {cell?.exempted
+                                ? 'EX'
+                                : cell?.missed
+                                  ? 'ABS'
+                                  : cell?.numericValue !== null && cell?.numericValue !== undefined
+                                    ? cell.numericValue
+                                    : '—'}
+                            </td>
+                          )}
                           {layout.showClassAverage && (
                             <td className={`${cellPad} text-right font-mono tabular-nums text-slate-500`}>
                               {classMean.toFixed(1)}

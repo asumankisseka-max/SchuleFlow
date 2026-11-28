@@ -9,7 +9,7 @@ import type {
   SchoolSettings,
   StudentCalculatedResult,
 } from '../types';
-import { getGradingScaleForLevel } from './calculations';
+import { getGradingScaleForLevel, getReportCardVisibleAssessments } from './calculations';
 
 const ACCENT_RGB: Record<ReportCardAccent, [number, number, number]> = {
   navy: [30, 58, 138],
@@ -304,14 +304,24 @@ export async function downloadReportCardsPdf(params: {
     doc.line(margin, y, pageWidth - margin, y);
     y += 3;
 
-    // 3. Subject Results Table
+    // 3. Subject Results Table (Dynamic assessments made)
     if (isOlevel) {
+      const vis = getReportCardVisibleAssessments(examClass.subjects, stu, 'olevel', cbc);
+      const assessHeaders: string[] = [];
+      if (cbc.aoiInputMode === 'single_aoi') {
+        if (vis.showU1) assessHeaders.push('Classwork');
+      } else {
+        if (vis.showU1) assessHeaders.push('U1');
+        if (vis.showU2) assessHeaders.push('U2');
+        if (vis.showU3) assessHeaders.push('U3');
+      }
+      if (vis.showAoiSummary) assessHeaders.push(`AoI (${cbc.formativeWeight}%)`);
+      if (vis.showEot) assessHeaders.push(`EoT (${cbc.summativeWeight}%)`);
+
       const headCols = [
         'Subject',
         ...(layout.showSubjectTeacher ? ['Teacher'] : []),
-        ...(cbc.aoiInputMode === 'single_aoi' ? ['Classwork'] : ['U1', 'U2', 'U3']),
-        `AoI (${cbc.formativeWeight}%)`,
-        `EoT (${cbc.summativeWeight}%)`,
+        ...assessHeaders,
         'Total',
         'ID',
         ...(layout.showClassAverage ? ['Avg'] : []),
@@ -324,14 +334,36 @@ export async function downloadReportCardsPdf(params: {
         const cell = stu.subjectResults[sub.id];
         const avgPct = subjectMeanPctMap.get(sub.id) ?? 0;
         const subTitle = layout.showSubjectCode ? `${sub.name} (${sub.code})` : sub.name;
-        const aoiCells =
-          cbc.aoiInputMode === 'single_aoi'
-            ? [cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—']
-            : [
-                cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—',
-                cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—',
-                cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—',
-              ];
+        const aoiCells: string[] = [];
+        if (cbc.aoiInputMode === 'single_aoi') {
+          if (vis.showU1) {
+            aoiCells.push(cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—');
+          }
+        } else {
+          if (vis.showU1) {
+            aoiCells.push(cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—');
+          }
+          if (vis.showU2) {
+            aoiCells.push(cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—');
+          }
+          if (vis.showU3) {
+            aoiCells.push(cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—');
+          }
+        }
+        if (vis.showAoiSummary) {
+          aoiCells.push(
+            cell?.aoiScore20 !== null && cell?.aoiScore20 !== undefined
+              ? cell.aoiScore20.toFixed(1)
+              : '—'
+          );
+        }
+        if (vis.showEot) {
+          aoiCells.push(
+            cell?.eotScore80 !== null && cell?.eotScore80 !== undefined
+              ? cell.eotScore80.toFixed(1)
+              : '—'
+          );
+        }
 
         const totalDisplay = cell?.exempted
           ? 'EX'
@@ -345,12 +377,6 @@ export async function downloadReportCardsPdf(params: {
           subTitle,
           ...(layout.showSubjectTeacher ? [sub.teacher || '—'] : []),
           ...aoiCells,
-          cell?.aoiScore20 !== null && cell?.aoiScore20 !== undefined
-            ? cell.aoiScore20.toFixed(1)
-            : '—',
-          cell?.eotScore80 !== null && cell?.eotScore80 !== undefined
-            ? cell.eotScore80.toFixed(1)
-            : '—',
           totalDisplay,
           cell?.identifier ?? '—',
           ...(layout.showClassAverage ? [`${avgPct.toFixed(1)}%`] : []),
@@ -360,12 +386,14 @@ export async function downloadReportCardsPdf(params: {
         ];
       });
 
+      const footAssessPlaceholders = assessHeaders.map((_, i) =>
+        i === assessHeaders.length - 1 ? `Mean (${stu.assessedCount})` : ''
+      );
+
       const footRow = [
         'Overall CBC Standing',
         ...(layout.showSubjectTeacher ? [''] : []),
-        ...(cbc.aoiInputMode === 'single_aoi' ? [''] : ['', '', '']),
-        `Mean (${stu.assessedCount})`,
-        '',
+        ...footAssessPlaceholders,
         `${stu.percentage.toFixed(1)}%`,
         '',
         ...(layout.showClassAverage ? [`${summary.classMeanPercent.toFixed(1)}%`] : []),
@@ -405,23 +433,40 @@ export async function downloadReportCardsPdf(params: {
       const principalSubjects = examClass.subjects.filter((s) => s.category !== 'subsidiary');
       const subsidiarySubjects = examClass.subjects.filter((s) => s.category === 'subsidiary');
 
-      const buildALevelRows = (list: typeof examClass.subjects) =>
+      const buildALevelRows = (
+        list: typeof examClass.subjects,
+        vis: ReturnType<typeof getReportCardVisibleAssessments>
+      ) =>
         list.map((sub) => {
           const cell = stu.subjectResults[sub.id];
           const classMean = subjectMeanMap.get(sub.id) ?? 0;
           const subTitle = layout.showSubjectCode ? `${sub.name} (${sub.code})` : sub.name;
-          const markVal = cell?.exempted
-            ? 'EX'
-            : cell?.missed
-              ? 'ABS'
-              : cell?.numericValue !== null && cell?.numericValue !== undefined
-                ? String(cell.numericValue)
-                : '—';
+          const assessCells: string[] = [];
+          if (vis.showU1) {
+            assessCells.push(cell?.u1 !== null && cell?.u1 !== undefined ? cell.u1.toFixed(1) : '—');
+          }
+          if (vis.showU2) {
+            assessCells.push(cell?.u2 !== null && cell?.u2 !== undefined ? cell.u2.toFixed(1) : '—');
+          }
+          if (vis.showU3) {
+            assessCells.push(cell?.u3 !== null && cell?.u3 !== undefined ? cell.u3.toFixed(1) : '—');
+          }
+          if (vis.showEot) {
+            assessCells.push(
+              cell?.exempted
+                ? 'EX'
+                : cell?.missed
+                  ? 'ABS'
+                  : cell?.numericValue !== null && cell?.numericValue !== undefined
+                    ? String(cell.numericValue)
+                    : '—'
+            );
+          }
 
           return [
             subTitle,
             ...(layout.showSubjectTeacher ? [sub.teacher || '—'] : []),
-            markVal,
+            ...assessCells,
             ...(layout.showClassAverage ? [classMean.toFixed(1)] : []),
             ...(layout.showSubjectRank ? [cell?.subjectRank ? `#${cell.subjectRank}` : '—'] : []),
             cell?.grade ?? '—',
@@ -430,10 +475,14 @@ export async function downloadReportCardsPdf(params: {
           ];
         });
 
+      const principalVis = getReportCardVisibleAssessments(principalSubjects, stu, 'alevel', cbc);
       const aHead = [
         'Principal Subject',
         ...(layout.showSubjectTeacher ? ['Teacher'] : []),
-        'Mark (100)',
+        ...(principalVis.showU1 ? ['U1'] : []),
+        ...(principalVis.showU2 ? ['U2'] : []),
+        ...(principalVis.showU3 ? ['U3'] : []),
+        ...(principalVis.showEot ? ['Mark (100)'] : []),
         ...(layout.showClassAverage ? ['Class Avg'] : []),
         ...(layout.showSubjectRank ? ['Pos'] : []),
         'Grade',
@@ -445,7 +494,7 @@ export async function downloadReportCardsPdf(params: {
         startY: y,
         margin: { left: margin, right: margin },
         head: [aHead],
-        body: buildALevelRows(principalSubjects),
+        body: buildALevelRows(principalSubjects, principalVis),
         theme: 'grid',
         styles: {
           fontSize: 7.5,
@@ -463,10 +512,14 @@ export async function downloadReportCardsPdf(params: {
       y = ((doc as unknown as { lastAutoTable?: { finalY?: number } }).lastAutoTable?.finalY ?? y + 35) + 3;
 
       if (subsidiarySubjects.length > 0) {
+        const subVis = getReportCardVisibleAssessments(subsidiarySubjects, stu, 'alevel', cbc);
         const subHead = [
           'Subsidiary Paper',
           ...(layout.showSubjectTeacher ? ['Teacher'] : []),
-          'Mark (100)',
+          ...(subVis.showU1 ? ['U1'] : []),
+          ...(subVis.showU2 ? ['U2'] : []),
+          ...(subVis.showU3 ? ['U3'] : []),
+          ...(subVis.showEot ? ['Mark (100)'] : []),
           ...(layout.showClassAverage ? ['Class Avg'] : []),
           ...(layout.showSubjectRank ? ['Pos'] : []),
           'Grade',
@@ -477,7 +530,7 @@ export async function downloadReportCardsPdf(params: {
           startY: y,
           margin: { left: margin, right: margin },
           head: [subHead],
-          body: buildALevelRows(subsidiarySubjects),
+          body: buildALevelRows(subsidiarySubjects, subVis),
           theme: 'grid',
           styles: {
             fontSize: 7.5,

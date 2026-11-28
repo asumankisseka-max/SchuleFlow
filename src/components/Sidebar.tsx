@@ -30,6 +30,7 @@ import type {
   WorkspaceTab,
 } from '../types';
 import { canAccessTab, normalizeUserRole, ROLE_DISPLAY_NAMES } from '../utils/rbac';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface SidebarProps {
   currentUser: UserAccount;
@@ -327,6 +328,8 @@ export function Sidebar({
               </p>
             </div>
           )}
+
+          <PWAInstallButton compact={isCompact} />
 
           {onChangePassword && (
             <button

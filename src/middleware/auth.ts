@@ -3,7 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index.ts';
 import { schools } from '../db/schema.ts';
 import { ensureInitialTenantsSeeded } from '../db/seed.ts';
-import { getUserProfileByUid } from '../db/users.ts';
+import { getAuthContextByUid } from '../db/users.ts';
 import { isLocalSessionToken, verifySessionToken } from '../lib/passwordAuth.ts';
 import type { AuthSessionProfile, GlobalRole, SchoolTenant, UserRole } from '../types.ts';
 import { normalizeUserRole } from '../utils/rbac.ts';
@@ -19,11 +19,19 @@ export interface AuthTokenContext {
   globalRole: GlobalRole;
 }
 
+export interface SubscriptionGateResult {
+  allowed: boolean;
+  expired?: boolean;
+  suspended?: boolean;
+  reason?: string;
+}
+
 export interface AuthRequest extends Request {
   user?: AuthTokenContext;
   dbUser?: AuthSessionProfile;
   schoolId?: string;
   school?: SchoolTenant;
+  subscriptionGate?: SubscriptionGateResult;
 }
 
 function parseCookies(cookieHeader: string | undefined): Record<string, string> {
@@ -44,7 +52,7 @@ function parseCookies(cookieHeader: string | undefined): Record<string, string> 
   return result;
 }
 
-function extractSessionToken(req: Request): string | null {
+export function extractSessionToken(req: Request): string | null {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const bearer = authHeader.slice('Bearer '.length).trim();
@@ -54,9 +62,41 @@ function extractSessionToken(req: Request): string | null {
   return cookies[SESSION_COOKIE_NAME] || null;
 }
 
+export function evaluateSchoolSubscriptionGate(
+  school: Pick<SchoolTenant, 'name' | 'status' | 'subscriptionStatus' | 'licenseExpiresAt'> | null
+): SubscriptionGateResult {
+  if (!school) {
+    return {
+      allowed: false,
+      reason: 'Assigned school record not found. Contact SchuleFlow Support.',
+    };
+  }
+
+  const effectiveStatus = school.subscriptionStatus || school.status;
+  if (effectiveStatus === 'suspended') {
+    return {
+      allowed: false,
+      suspended: true,
+      reason: `${school.name} subscription is currently suspended. Please contact SchuleFlow Support to restore access.`,
+    };
+  }
+
+  const expiresMs = Date.parse(school.licenseExpiresAt);
+  const isExpiredByDate = Number.isFinite(expiresMs) && expiresMs < Date.now();
+  if (effectiveStatus === 'expired' || isExpiredByDate) {
+    return {
+      allowed: false,
+      expired: true,
+      reason: `${school.name} subscription has expired. Choose a package in the Subscription Portal to restore access.`,
+    };
+  }
+
+  return { allowed: true };
+}
+
 export async function checkSchoolSubscriptionGate(
   schoolId: string | null
-): Promise<{ allowed: boolean; expired?: boolean; suspended?: boolean; reason?: string }> {
+): Promise<SubscriptionGateResult> {
   if (!schoolId) {
     return {
       allowed: false,
@@ -83,26 +123,12 @@ export async function checkSchoolSubscriptionGate(
     };
   }
 
-  const effectiveStatus = school.subscriptionStatus || school.status;
-  if (effectiveStatus === 'suspended') {
-    return {
-      allowed: false,
-      suspended: true,
-      reason: `${school.name} subscription is currently suspended. Please contact SchuleFlow Support to restore access.`,
-    };
-  }
-
-  const isExpiredByDate =
-    school.licenseExpiresAt instanceof Date && school.licenseExpiresAt.getTime() < Date.now();
-  if (effectiveStatus === 'expired' || isExpiredByDate) {
-    return {
-      allowed: false,
-      expired: true,
-      reason: `${school.name} subscription has expired. Choose a package in the Subscription Portal to restore access.`,
-    };
-  }
-
-  return { allowed: true };
+  return evaluateSchoolSubscriptionGate({
+    name: school.name,
+    status: school.status as SchoolTenant['status'],
+    subscriptionStatus: (school.subscriptionStatus || school.status) as SchoolTenant['subscriptionStatus'],
+    licenseExpiresAt: school.licenseExpiresAt.toISOString(),
+  });
 }
 
 export const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -123,14 +149,24 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
       return res.status(401).json({ error: 'Unauthorized: Session expired. Please sign in again.' });
     }
 
-    const dbUser = await getUserProfileByUid(session.uid);
+    const authCtx = await getAuthContextByUid(session.uid);
+    const dbUser = authCtx?.profile ?? null;
     const sessionSchoolId = session.schoolId;
     const sessionUserId = session.userId;
     const sessionStaffId = session.staffId;
     const sessionRole = session.role;
 
-    if (!dbUser) {
+    if (!dbUser || !authCtx) {
       return res.status(401).json({ error: 'Unauthorized: User account no longer exists.' });
+    }
+
+    if (
+      authCtx.sessionValidAfterMs !== null &&
+      (typeof session.iat !== 'number' || session.iat < authCtx.sessionValidAfterMs)
+    ) {
+      return res.status(401).json({
+        error: 'Unauthorized: Session has been revoked. Please sign in again.',
+      });
     }
 
     if (!dbUser.active) {
@@ -152,12 +188,14 @@ export const requireAuth = async (req: AuthRequest, res: Response, next: NextFun
     // Subscription Gatekeeper for school-level accounts:
     // Suspended schools are blocked everywhere; expired schools may enter ONLY the subscription portal routes
     if (dbUser.globalRole !== 'super_admin') {
-      const gate = await checkSchoolSubscriptionGate(dbUser.schoolId);
+      const gate = evaluateSchoolSubscriptionGate(authCtx.school);
       if (!gate.allowed && !gate.expired) {
         return res.status(403).json({
           error: gate.reason || 'Account not assigned to an active school workspace.',
         });
       }
+      req.school = authCtx.school ?? undefined;
+      req.subscriptionGate = gate;
     }
 
     req.user = {

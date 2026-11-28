@@ -18,10 +18,14 @@ function buildUrlClient(directUrl: string): PostgresClient {
     directUrl.includes('127.0.0.1') ||
     directUrl.includes('host=/');
 
+  const poolMax = Math.max(10, Math.min(100, Number(process.env.DB_POOL_MAX) || 25));
+
   return postgres(directUrl, {
     prepare: false,
-    max: 10,
-    connect_timeout: 5,
+    max: poolMax,
+    idle_timeout: 20,
+    max_lifetime: 1800,
+    connect_timeout: 10,
     ssl: isLocal ? false : 'require',
   });
 }
@@ -39,14 +43,18 @@ function buildSqlHostClient(): PostgresClient | null {
   const isLocalOrSocket =
     host.startsWith('/') || host === 'localhost' || host === '127.0.0.1';
 
+  const poolMax = Math.max(10, Math.min(100, Number(process.env.DB_POOL_MAX) || 25));
+
   return postgres({
     host,
     user,
     password,
     database,
     prepare: false,
-    max: 10,
-    connect_timeout: 5,
+    max: poolMax,
+    idle_timeout: 20,
+    max_lifetime: 1800,
+    connect_timeout: 10,
     ssl: isLocalOrSocket ? false : 'require',
   });
 }

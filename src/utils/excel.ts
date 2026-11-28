@@ -71,6 +71,9 @@ export interface StaffDirectoryImportRow {
 }
 
 export async function parseExcelFile(file: File): Promise<ParsedWorkbook> {
+  if (file.size > 10 * 1024 * 1024) {
+    throw new Error('Spreadsheet file exceeds 10 MB limit.');
+  }
   const buffer = await file.arrayBuffer();
   const workbook = XLSX.read(buffer, { type: 'array' });
 

@@ -77,12 +77,17 @@ export function requireTenantScopeWithOptions(options: { allowExpired?: boolean 
         });
       }
 
-      const gate = await checkSchoolSubscriptionGate(requestedSchoolId);
+      const gate = req.subscriptionGate ?? (await checkSchoolSubscriptionGate(requestedSchoolId));
       const allowExpiredHere = Boolean(options.allowExpired && gate.expired && !gate.suspended);
       if (!gate.allowed && !allowExpiredHere) {
         return res.status(403).json({
           error: gate.reason || 'School subscription is inactive.',
         });
+      }
+
+      if (req.school && req.school.id === requestedSchoolId) {
+        req.schoolId = requestedSchoolId;
+        return next();
       }
 
       const rows = await db

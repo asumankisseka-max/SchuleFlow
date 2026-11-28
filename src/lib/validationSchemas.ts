@@ -67,7 +67,7 @@ export const studentProfileSchema = z.object({
 
 export const createStudentsBodySchema = z
   .object({
-    students: z.array(studentProfileSchema).max(500).optional(),
+    students: z.array(studentProfileSchema).max(1500).optional(),
     student: studentProfileSchema.optional(),
   })
   .refine((d) => (d.students && d.students.length > 0) || Boolean(d.student), {
@@ -223,6 +223,134 @@ export const mediaUploadSchema = z.object({
   folder: z.enum(['logos', 'students']),
   entityId: z.string().trim().max(120).optional(),
   dataUrl: z.string().min(10, 'Image data is required.').max(4_500_000),
+});
+
+const safeImageUrlOrData = z
+  .string()
+  .max(4_500_000)
+  .refine(
+    (val) => {
+      const trimmed = val.trim();
+      if (!trimmed) return true;
+      return (
+        trimmed.startsWith('https://') ||
+        trimmed.startsWith('http://') ||
+        trimmed.startsWith('/') ||
+        trimmed.startsWith('data:image/')
+      );
+    },
+    { message: 'Logo URL must be an https URL, relative path, or image data URL.' }
+  );
+
+const gradeBandSchema = z.object({
+  grade: z.string().trim().min(1).max(12),
+  minPercentage: z.coerce.number().min(0).max(100),
+  label: z.string().trim().min(1).max(60),
+  gpa: z.coerce.number().min(0).max(100),
+  description: z.string().trim().max(240).optional(),
+});
+
+export const schoolSettingsSchema = z.object({
+  schoolName: z.string().trim().min(2).max(160),
+  schoolAddress: z.string().trim().min(2).max(240),
+  schoolPhone: z.string().trim().min(4).max(60),
+  schoolEmail: z.string().trim().email('Valid school email is required.'),
+  academicYear: z.string().trim().min(4).max(20),
+  termName: z.string().trim().min(1).max(60),
+  principalName: z.string().trim().min(2).max(120),
+  dosName: z.string().trim().min(2).max(120),
+  curriculumScope: z.enum(['olevel_only', 'alevel_only', 'olevel_alevel']).optional(),
+  badgeDataUrl: safeImageUrlOrData.optional().transform((v) => v || undefined),
+  uniformPrimaryColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  uniformSecondaryColor: z.string().trim().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  cbcConfig: z.object({
+    aoiMaxMark: z.coerce.number().min(1).max(100),
+    eotMaxMark: z.coerce.number().min(1).max(100),
+    formativeWeight: z.coerce.number().min(0).max(100),
+    summativeWeight: z.coerce.number().min(0).max(100),
+    roundingMode: z.enum(['one_decimal', 'two_decimals', 'whole']),
+    aoiInputMode: z.enum(['u1_u3', 'single_aoi']),
+  }),
+  alevelPolicy: z.object({
+    maxPrincipalsCount: z.coerce.number().int().min(1).max(6),
+    maxSubsidiariesCount: z.coerce.number().int().min(0).max(4),
+    subsidiaryPassMark: z.coerce.number().min(0).max(100),
+    includeSubsidiaryPoints: z.boolean(),
+  }),
+  olevelGradingScale: z.array(gradeBandSchema).min(1).max(15),
+  alevelGradingScale: z.array(gradeBandSchema).min(1).max(15),
+  reportLayout: z.object({
+    style: z.enum(['classic', 'modern', 'compact']),
+    accentColor: z.enum(['navy', 'emerald', 'burgundy', 'slate', 'indigo']),
+    headerAlignment: z.enum(['split', 'centered']),
+    crestType: z.enum(['shield', 'book', 'award', 'graduation', 'custom', 'none']),
+    customLogoDataUrl: safeImageUrlOrData.optional(),
+    reportTitle: z.string().trim().max(160),
+    schoolMotto: z.string().trim().max(240),
+    schoolContact: z.string().trim().max(240),
+    showStudentPhoto: z.boolean(),
+    showSubjectCode: z.boolean(),
+    showPassMark: z.boolean(),
+    showClassAverage: z.boolean(),
+    showSubjectRank: z.boolean(),
+    showSubjectTeacher: z.boolean(),
+    showClassPosition: z.boolean(),
+    showOverallSummaryStrip: z.boolean(),
+    showPerformanceChart: z.boolean(),
+    showGradingKey: z.boolean(),
+    showCompetenciesSection: z.boolean(),
+    showDosComment: z.boolean(),
+    showParentSignature: z.boolean(),
+    showSchoolStampBox: z.boolean(),
+    showNextTermDate: z.boolean(),
+    nextTermClosingDate: z.string().trim().max(80),
+    nextTermDate: z.string().trim().max(80),
+    leftSignatureLabel: z.string().trim().max(80),
+    rightSignatureLabel: z.string().trim().max(80),
+    parentSignatureLabel: z.string().trim().max(80),
+    footerNote: z.string().trim().max(300),
+  }),
+});
+
+export const updateSchoolSubscriptionSchema = z.object({
+  status: z.enum(['active', 'trial', 'suspended', 'expired']).optional(),
+  subscriptionStatus: z.enum(['active', 'trial', 'suspended', 'expired']).optional(),
+  licenseExpiresAt: z.string().trim().max(60).optional(),
+  plan: z.enum(['trial', 'starter', 'standard', 'enterprise']).optional(),
+  studentQuota: z.coerce.number().int().min(1).max(20000).optional(),
+  termFeePerStudentUgx: z.coerce.number().int().min(0).max(500000).optional(),
+  billingStatus: z.enum(['paid', 'pending', 'overdue']).optional(),
+  nextBillingDate: z.string().trim().max(40).optional(),
+});
+
+export const trackReportsSchema = z.object({
+  count: z.coerce.number().int().min(1).max(1000).default(1),
+});
+
+export const recoveryLookupSchema = z
+  .object({
+    identifier: z.string().trim().max(180).optional(),
+    schoolCode: z.string().trim().max(40).optional(),
+    fullName: z.string().trim().max(160).optional(),
+  })
+  .refine(
+    (d) => Boolean(d.identifier?.trim()) || (Boolean(d.schoolCode?.trim()) && Boolean(d.fullName?.trim())),
+    { message: 'Enter your Staff ID, email, or phone — or enter your School Code and full name.' }
+  );
+
+export const recoveryVerifySchema = z.object({
+  recoveryToken: z.string().trim().min(10).max(2000),
+  verification: z.string().trim().min(1, 'Verification details are required.').max(200),
+});
+
+export const recoveryResetPasswordSchema = z.object({
+  resetToken: z.string().trim().min(10).max(2000),
+  newPassword: z.string().min(8, 'New password must be at least 8 characters long.').max(200),
+});
+
+export const recoveryRequestAdminSchema = z.object({
+  recoveryToken: z.string().trim().min(10).max(2000),
+  note: z.string().trim().max(500).optional(),
 });
 
 export function parseWithSchema<T>(
